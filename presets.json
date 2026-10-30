@@ -1,0 +1,1419 @@
+{
+  "Flat": {
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Low Shelf",
+        "freq": 172.0623188980458,
+        "gain": 0.0,
+        "q": 0.707
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 250.0,
+        "gain": 0.0,
+        "q": 1.414
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1000.0,
+        "gain": 0.0,
+        "q": 1.414
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4000.0,
+        "gain": 0.0,
+        "q": 0.71
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "High Shelf",
+        "freq": 8000.0,
+        "gain": 0.0,
+        "q": 0.707
+      }
+    ]
+  },
+  "AutoEQ: MEZE 105 AER (PEQdB Diamond)": {
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 20.0,
+        "gain": 8.9,
+        "q": 0.76
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 46.5,
+        "gain": 2.7,
+        "q": 0.68
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 61.7,
+        "gain": 1.4,
+        "q": 1.32
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 105.0,
+        "gain": 0.0,
+        "q": 0.79
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 156.0,
+        "gain": -3.4,
+        "q": 0.97
+      },
+      {
+        "band_id": 6,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 166.0,
+        "gain": 0.5,
+        "q": 2.84
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 316.0,
+        "gain": -0.5,
+        "q": 1.25
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 398.0,
+        "gain": -1.2,
+        "q": 3.79
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 431.0,
+        "gain": 1.3,
+        "q": 2.33
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 602.0,
+        "gain": 0.5,
+        "q": 2.75
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 783.0,
+        "gain": -1.0,
+        "q": 0.5
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1378.0,
+        "gain": 1.8,
+        "q": 1.79
+      },
+      {
+        "band_id": 13,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1837.0,
+        "gain": 1.8,
+        "q": 3.0
+      },
+      {
+        "band_id": 14,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2260.0,
+        "gain": 1.4,
+        "q": 4.88
+      },
+      {
+        "band_id": 15,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4100.0,
+        "gain": -6.9,
+        "q": 3.62
+      },
+      {
+        "band_id": 16,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5776.0,
+        "gain": -8.2,
+        "q": 3.61
+      },
+      {
+        "band_id": 17,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5845.0,
+        "gain": 3.9,
+        "q": 0.65
+      },
+      {
+        "band_id": 18,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 8495.0,
+        "gain": 9.0,
+        "q": 1.33
+      }
+    ],
+    "autoeq": {
+      "is_autoeq": true,
+      "database_id": "peqdb",
+      "database_name": "PEQdB (Sharur / Diamond)",
+      "base_url": "https://peqdb.com/",
+      "model_name": "MEZE 105 AER",
+      "model_file": "MEZE 105 AER",
+      "target_name": "PEQdB Diamond",
+      "target_file": "PEQdB Diamond",
+      "channel_mode": "avg"
+    }
+  },
+  "New Profile 1": {
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2600.0,
+        "gain": 0.0,
+        "q": 1.414
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 290.5518831787187,
+        "gain": -1.867881548974946,
+        "q": 1.414
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 3000.0,
+        "gain": 0.0,
+        "q": 1.414
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4000.0,
+        "gain": 0.0,
+        "q": 1.414
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "High Shelf",
+        "freq": 8000.0,
+        "gain": 0.0,
+        "q": 0.707
+      }
+    ]
+  },
+  "New Profile 2": {
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Low Shelf",
+        "freq": 100.0,
+        "gain": 0.0,
+        "q": 0.707
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 250.0,
+        "gain": 0.0,
+        "q": 1.414
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1000.0,
+        "gain": 0.0,
+        "q": 1.414
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2400.913720171154,
+        "gain": 0.1366742596810937,
+        "q": 1.414
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "High Shelf",
+        "freq": 8000.0,
+        "gain": 0.0,
+        "q": 0.707
+      }
+    ]
+  },
+  "AutoEQ: MEZE 105 AER (Harman OE 2018)": {
+    "preamp_db": -5.4,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Low Shelf",
+        "freq": 26.5,
+        "gain": 8.4,
+        "q": 0.47
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 107.0,
+        "gain": -0.5,
+        "q": 2.91
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 139.0,
+        "gain": -1.3,
+        "q": 2.14
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 207.0,
+        "gain": -2.6,
+        "q": 1.08
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 385.0,
+        "gain": -0.9,
+        "q": 2.85
+      },
+      {
+        "band_id": 6,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 418.0,
+        "gain": 0.7,
+        "q": 1.56
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 440.0,
+        "gain": 0.5,
+        "q": 1.28
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 528.0,
+        "gain": 0.2,
+        "q": 0.79
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 856.0,
+        "gain": -0.8,
+        "q": 1.62
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1187.0,
+        "gain": -0.4,
+        "q": 1.57
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1390.0,
+        "gain": 0.4,
+        "q": 1.42
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1882.0,
+        "gain": 2.0,
+        "q": 1.31
+      },
+      {
+        "band_id": 13,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2488.0,
+        "gain": 1.0,
+        "q": 1.26
+      },
+      {
+        "band_id": 14,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2883.0,
+        "gain": -3.4,
+        "q": 2.95
+      },
+      {
+        "band_id": 15,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4043.0,
+        "gain": -2.9,
+        "q": 4.31
+      },
+      {
+        "band_id": 16,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4096.0,
+        "gain": -3.4,
+        "q": 4.36
+      },
+      {
+        "band_id": 17,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5815.0,
+        "gain": -8.8,
+        "q": 3.26
+      },
+      {
+        "band_id": 18,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 8013.0,
+        "gain": 6.5,
+        "q": 0.75
+      }
+    ],
+    "autoeq": {
+      "is_autoeq": true,
+      "database_id": "peqdb",
+      "database_name": "PEQdB (Sharur / Diamond)",
+      "base_url": "https://peqdb.com/",
+      "model_name": "MEZE 105 AER",
+      "model_file": "MEZE 105 AER",
+      "target_name": "Harman OE 2018",
+      "target_file": "Harman OE 2018",
+      "channel_mode": "avg"
+    }
+  },
+  "AutoEQ: 105 AER (KEMAR DF (KB006x) 10dB Tilt)": {
+    "preamp_db": -8.6,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Low Shelf",
+        "freq": 155.0,
+        "gain": 3.1,
+        "q": 0.91
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 53.1,
+        "gain": -4.7,
+        "q": 0.5
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 112.0,
+        "gain": -3.0,
+        "q": 1.08
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 249.0,
+        "gain": 0.9,
+        "q": 1.55
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 454.0,
+        "gain": 1.1,
+        "q": 2.41
+      },
+      {
+        "band_id": 6,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 492.0,
+        "gain": -1.4,
+        "q": 0.75
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 594.0,
+        "gain": 0.6,
+        "q": 2.01
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 798.0,
+        "gain": -0.9,
+        "q": 1.95
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1103.0,
+        "gain": -0.5,
+        "q": 1.39
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1165.0,
+        "gain": -1.3,
+        "q": 1.72
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1493.0,
+        "gain": 0.6,
+        "q": 2.03
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1730.0,
+        "gain": 2.5,
+        "q": 0.53
+      },
+      {
+        "band_id": 13,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2287.0,
+        "gain": 3.5,
+        "q": 2.26
+      },
+      {
+        "band_id": 14,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 3065.0,
+        "gain": -5.0,
+        "q": 3.01
+      },
+      {
+        "band_id": 15,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4039.0,
+        "gain": -7.1,
+        "q": 3.73
+      },
+      {
+        "band_id": 16,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5306.0,
+        "gain": -4.3,
+        "q": 6.0
+      },
+      {
+        "band_id": 17,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5775.0,
+        "gain": -4.9,
+        "q": 5.04
+      },
+      {
+        "band_id": 18,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 8069.0,
+        "gain": 9.0,
+        "q": 2.41
+      }
+    ],
+    "autoeq": {
+      "is_autoeq": true,
+      "database_id": "superreview_hp",
+      "database_name": "Super* Review (Headphones)",
+      "base_url": "https://squig.link/headphones/",
+      "model_name": "105 AER",
+      "model_file": "Meze 105 AER",
+      "target_name": "KEMAR DF (KB006x) 10dB Tilt",
+      "target_file": "KEMAR DF (KB006x) 10dB Tilt Target",
+      "channel_mode": "avg"
+    }
+  },
+  "AutoEQ: TRUTHEAR HEXA (PEQdB Diamond)": {
+    "preamp_db": -9.3,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Low Shelf",
+        "freq": 80.0,
+        "gain": 2.4,
+        "q": 0.94
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 94.0,
+        "gain": 1.6,
+        "q": 0.51
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 169.0,
+        "gain": -1.1,
+        "q": 2.02
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 173.0,
+        "gain": -0.3,
+        "q": 1.36
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 252.0,
+        "gain": -1.3,
+        "q": 1.8
+      },
+      {
+        "band_id": 6,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 385.0,
+        "gain": -1.2,
+        "q": 1.71
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 508.0,
+        "gain": 0.0,
+        "q": 1.48
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 554.0,
+        "gain": 0.0,
+        "q": 1.45
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 776.0,
+        "gain": 0.8,
+        "q": 1.72
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 900.0,
+        "gain": 0.3,
+        "q": 2.04
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1075.0,
+        "gain": -0.3,
+        "q": 1.95
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1352.0,
+        "gain": -0.5,
+        "q": 1.55
+      },
+      {
+        "band_id": 13,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2004.0,
+        "gain": 1.2,
+        "q": 1.94
+      },
+      {
+        "band_id": 14,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2554.0,
+        "gain": 2.6,
+        "q": 2.06
+      },
+      {
+        "band_id": 15,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4223.0,
+        "gain": 1.4,
+        "q": 1.61
+      },
+      {
+        "band_id": 16,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4924.0,
+        "gain": 4.2,
+        "q": 1.29
+      },
+      {
+        "band_id": 17,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 6632.0,
+        "gain": 1.7,
+        "q": 1.67
+      },
+      {
+        "band_id": 18,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 6932.0,
+        "gain": 5.0,
+        "q": 2.36
+      }
+    ],
+    "autoeq": {
+      "is_autoeq": true,
+      "database_id": "peqdb",
+      "database_name": "PEQdB (Sharur / Diamond)",
+      "base_url": "https://peqdb.com/",
+      "model_name": "TRUTHEAR HEXA",
+      "model_file": "TRUTHEAR HEXA",
+      "target_name": "PEQdB Diamond",
+      "target_file": "PEQdB Diamond",
+      "channel_mode": "avg"
+    }
+  },
+  "AutoEQ: Hexa (Harman IE 2019)": {
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Low Shelf",
+        "freq": 67.2,
+        "gain": -0.2,
+        "q": 1.51
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 59.0,
+        "gain": 0.5,
+        "q": 1.0
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 145.0,
+        "gain": -0.5,
+        "q": 0.75
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 221.0,
+        "gain": -0.2,
+        "q": 2.8
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 279.0,
+        "gain": -0.2,
+        "q": 1.91
+      },
+      {
+        "band_id": 6,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 410.0,
+        "gain": -0.2,
+        "q": 2.02
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 610.0,
+        "gain": -0.2,
+        "q": 1.63
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 621.0,
+        "gain": 0.2,
+        "q": 1.73
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 665.0,
+        "gain": 0.2,
+        "q": 1.67
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 886.0,
+        "gain": -0.2,
+        "q": 2.11
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 910.0,
+        "gain": 0.5,
+        "q": 1.8
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1460.0,
+        "gain": -0.2,
+        "q": 0.92
+      },
+      {
+        "band_id": 13,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1726.0,
+        "gain": 0.6,
+        "q": 1.91
+      },
+      {
+        "band_id": 14,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2106.0,
+        "gain": 0.8,
+        "q": 2.46
+      },
+      {
+        "band_id": 15,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2533.0,
+        "gain": 1.0,
+        "q": 2.38
+      },
+      {
+        "band_id": 16,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 3972.0,
+        "gain": 0.8,
+        "q": 2.95
+      },
+      {
+        "band_id": 17,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4650.0,
+        "gain": 1.1,
+        "q": 2.85
+      },
+      {
+        "band_id": 18,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5720.0,
+        "gain": 1.5,
+        "q": 3.46
+      }
+    ],
+    "autoeq": {
+      "is_autoeq": true,
+      "database_id": "superreview",
+      "database_name": "Super* Review (IEMs)",
+      "base_url": "https://squig.link/",
+      "model_name": "Hexa",
+      "model_file": "Truthear Hexa (S2)",
+      "target_name": "Harman IE 2019",
+      "target_file": "Harman IE 2019 Target",
+      "channel_mode": "avg"
+    }
+  },
+  "AutoEQ: TRUTHEAR HEXA (Harman IE 2019)": {
+    "preamp_db": -7.3,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Low Shelf",
+        "freq": 66.2,
+        "gain": 0.9,
+        "q": 1.28
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 78.8,
+        "gain": 1.9,
+        "q": 0.52
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 178.0,
+        "gain": -1.4,
+        "q": 1.24
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 190.0,
+        "gain": 0.0,
+        "q": 1.39
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 261.0,
+        "gain": -0.9,
+        "q": 2.09
+      },
+      {
+        "band_id": 6,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 371.0,
+        "gain": -0.6,
+        "q": 1.71
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 649.0,
+        "gain": -0.2,
+        "q": 1.79
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 686.0,
+        "gain": -0.8,
+        "q": 0.85
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 704.0,
+        "gain": 1.1,
+        "q": 1.35
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 914.0,
+        "gain": 0.6,
+        "q": 1.83
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1116.0,
+        "gain": -0.2,
+        "q": 1.61
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1291.0,
+        "gain": -0.7,
+        "q": 1.64
+      },
+      {
+        "band_id": 13,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1490.0,
+        "gain": 0.3,
+        "q": 1.83
+      },
+      {
+        "band_id": 14,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2030.0,
+        "gain": 1.7,
+        "q": 1.91
+      },
+      {
+        "band_id": 15,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2464.0,
+        "gain": 2.0,
+        "q": 2.09
+      },
+      {
+        "band_id": 16,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 3751.0,
+        "gain": 1.0,
+        "q": 2.39
+      },
+      {
+        "band_id": 17,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4518.0,
+        "gain": 4.0,
+        "q": 2.4
+      },
+      {
+        "band_id": 18,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5918.0,
+        "gain": 5.6,
+        "q": 2.46
+      }
+    ],
+    "autoeq": {
+      "is_autoeq": true,
+      "database_id": "peqdb",
+      "database_name": "PEQdB (Sharur / Diamond)",
+      "base_url": "https://peqdb.com/",
+      "model_name": "TRUTHEAR HEXA",
+      "model_file": "TRUTHEAR HEXA",
+      "target_name": "Harman IE 2019",
+      "target_file": "Harman IE 2019",
+      "channel_mode": "avg"
+    }
+  },
+  "peqDBPersonalHexa": {
+    "preamp_db": -4.3,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 20.0,
+        "gain": -1.23,
+        "q": 0.4
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 42.0,
+        "gain": -9.24,
+        "q": 0.596
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 72.0,
+        "gain": -5.33,
+        "q": 0.597
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 75.0,
+        "gain": -0.8,
+        "q": 1.029
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 101.0,
+        "gain": 14.2,
+        "q": 0.6
+      },
+      {
+        "band_id": 6,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 842.0,
+        "gain": 3.36,
+        "q": 0.893
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1181.0,
+        "gain": -2.37,
+        "q": 0.832
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2187.0,
+        "gain": 0.91,
+        "q": 1.12
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2562.0,
+        "gain": 7.57,
+        "q": 0.884
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2739.0,
+        "gain": -4.74,
+        "q": 1.2
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 3256.0,
+        "gain": -4.01,
+        "q": 1.551
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4125.0,
+        "gain": 4.3,
+        "q": 0.7
+      },
+      {
+        "band_id": 13,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5704.0,
+        "gain": 3.26,
+        "q": 0.4
+      },
+      {
+        "band_id": 14,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 7259.0,
+        "gain": -0.9,
+        "q": 3.521
+      },
+      {
+        "band_id": 15,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 10082.0,
+        "gain": 1.27,
+        "q": 2.65
+      },
+      {
+        "band_id": 16,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5800.0,
+        "gain": -3.0,
+        "q": 1.0
+      },
+      {
+        "band_id": 17,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 8000.0,
+        "gain": -3.3,
+        "q": 1.41
+      },
+      {
+        "band_id": 18,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4000.0,
+        "gain": -2.4,
+        "q": 0.5
+      }
+    ]
+  },
+  "HexaPreference": {
+    "preamp_db": -4.3,
+    "bands": [
+      {
+        "band_id": 1,
+        "enabled": false,
+        "filter_type": "Peak",
+        "freq": 20.0,
+        "gain": -1.23,
+        "q": 0.4
+      },
+      {
+        "band_id": 2,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 40.71945207784065,
+        "gain": 3.518930957683743,
+        "q": 0.876
+      },
+      {
+        "band_id": 3,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 42.0,
+        "gain": -9.24,
+        "q": 0.596
+      },
+      {
+        "band_id": 4,
+        "enabled": true,
+        "filter_type": "Low Shelf",
+        "freq": 61.980926783988544,
+        "gain": 4.67706013363029,
+        "q": 1.021
+      },
+      {
+        "band_id": 5,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 72.0,
+        "gain": -5.33,
+        "q": 0.597
+      },
+      {
+        "band_id": 6,
+        "enabled": false,
+        "filter_type": "Peak",
+        "freq": 75.0,
+        "gain": -0.8,
+        "q": 1.029
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 103.94879741744009,
+        "gain": 14.565701559020045,
+        "q": 0.6
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 842.0,
+        "gain": 3.36,
+        "q": 0.893
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1000.0,
+        "gain": 0.0,
+        "q": 1.414
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1181.0,
+        "gain": -2.37,
+        "q": 0.832
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2187.0,
+        "gain": 0.91,
+        "q": 1.12
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2562.0,
+        "gain": 7.57,
+        "q": 0.884
+      },
+      {
+        "band_id": 13,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2739.0,
+        "gain": -4.74,
+        "q": 1.2
+      },
+      {
+        "band_id": 14,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 3256.0,
+        "gain": -4.01,
+        "q": 1.551
+      },
+      {
+        "band_id": 15,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4000.0,
+        "gain": -2.4,
+        "q": 0.5
+      },
+      {
+        "band_id": 16,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4125.0,
+        "gain": 4.3,
+        "q": 0.7
+      },
+      {
+        "band_id": 17,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5704.0,
+        "gain": 3.26,
+        "q": 0.4
+      },
+      {
+        "band_id": 18,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 5800.0,
+        "gain": -3.0,
+        "q": 1.0
+      },
+      {
+        "band_id": 19,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 7259.0,
+        "gain": -0.9,
+        "q": 3.521
+      },
+      {
+        "band_id": 20,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 8000.0,
+        "gain": -3.3,
+        "q": 1.41
+      },
+      {
+        "band_id": 21,
+        "enabled": true,
+        "filter_type": "High Shelf",
+        "freq": 6774.146070381359,
+        "gain": 0.8463251670378611,
+        "q": 0.658
+      }
+    ]
+  }
+}

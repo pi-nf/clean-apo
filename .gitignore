@@ -1,0 +1,34 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# PyInstaller & Build artifacts
+build/
+dist/
+dist-package/
+*.manifest
+*.spec.bak
+
+# Local runtime & cache files
+.clean_apo_cache/
+eq_output.txt
+settings.json
+*.log
+
+# IDE & Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS artifacts
+Thumbs.db
+Desktop.ini
