@@ -319,6 +319,20 @@ class OfflineCurveDatabase:
         finally:
             conn.close()
 
+    def clear_all(self) -> None:
+        """Clears all cached measurements and targets and vacuums the database to reclaim disk space."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM measurements")
+                cur.execute("DELETE FROM targets")
+                conn.commit()
+                cur.execute("VACUUM")
+                conn.commit()
+            finally:
+                conn.close()
+
 
 # Global singleton instance
 _GLOBAL_OFFLINE_DB: Optional[OfflineCurveDatabase] = None

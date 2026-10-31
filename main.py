@@ -37,6 +37,10 @@ from presets import (
     get_apo_configurator_path,
     launch_apo_configurator,
     clean_apo_device_name,
+    is_equalizer_apo_installed,
+    get_bundled_apo_installer_path,
+    launch_apo_installer,
+    ensure_apo_root_config_include,
 )
 from audio_stream import AudioSpectrumWorker, get_available_audio_devices, get_available_playback_devices
 from eq_plot import (
@@ -85,7 +89,13 @@ class CurveFetchWorker(QtCore.QThread):
         client: SquigClient,
         base_url: str,
         model: Optional[SquigModel],
-        target: Optional[SquigTarget],
+        target_mode: int = 0,  # 0 = Target Curve, 1 = IEM Tuning, 2 = Resultant Profile
+        target: Optional[SquigTarget] = None,
+        target_iem_model: Optional[SquigModel] = None,
+        target_iem_chan: str = "avg",
+        target_profile_name: str = "",
+        preset_manager: Optional[PresetManager] = None,
+        sample_rate: float = 48000.0,
         channel_mode: str = "avg",
         parent=None,
     ):
@@ -93,7 +103,13 @@ class CurveFetchWorker(QtCore.QThread):
         self.client = client
         self.base_url = base_url
         self.model = model
+        self.target_mode = target_mode
         self.target = target
+        self.target_iem_model = target_iem_model
+        self.target_iem_chan = target_iem_chan
+        self.target_profile_name = target_profile_name
+        self.preset_manager = preset_manager
+        self.sample_rate = sample_rate
         self.channel_mode = channel_mode
 
     def run(self) -> None:
@@ -101,9 +117,66 @@ class CurveFetchWorker(QtCore.QThread):
             mf, ms = ([], [])
             tf, ts = ([], [])
             if self.model:
-                mf, ms = self.client.fetch_iem_measurement(self.base_url, self.model, self.channel_mode)
-            if self.target:
-                tf, ts = self.client.fetch_target_curve(self.base_url, self.target)
+                m_url = getattr(self.model, "base_url", "") or self.base_url
+                mf, ms = self.client.fetch_iem_measurement(m_url, self.model, self.channel_mode)
+
+            if self.target_mode == 0:
+                # Mode 0: Standard Target Curve (e.g. Harman, IEF)
+                if self.target:
+                    tf, ts = self.client.fetch_target_curve(self.base_url, self.target)
+            elif self.target_mode == 1:
+                # Mode 1: IEM / Headphone Tuning (Raw measured acoustic response)
+                if self.target_iem_model:
+                    t_url = getattr(self.target_iem_model, "base_url", "") or self.base_url
+                    tf, ts = self.client.fetch_iem_measurement(t_url, self.target_iem_model, self.target_iem_chan)
+            elif self.target_mode == 2:
+                # Mode 2: Resultant Profile Response (Measurement + EQ filters)
+                if self.target_profile_name and self.preset_manager:
+                    p_data = self.preset_manager.presets.get(self.target_profile_name)
+                    if p_data:
+                        bands = [EQBand.from_dict(b) for b in p_data.get("bands", [])]
+                        meta = p_data.get("autoeq") or {}
+                        db_id = meta.get("database_id", "")
+                        m_file = meta.get("model_file") or meta.get("model_name", "")
+                        p_chan = meta.get("channel_mode", "avg")
+                        p_base_url = meta.get("base_url", "") or self.base_url
+
+                        meas_res = None
+                        if db_id and m_file:
+                            try:
+                                from offline_db import get_offline_db
+                                meas_res = get_offline_db().get_measurement(db_id, m_file, p_chan)
+                            except Exception:
+                                meas_res = None
+
+                        if not meas_res and m_file and p_base_url:
+                            try:
+                                temp_m = SquigModel(
+                                    brand="",
+                                    name=m_file,
+                                    full_name=m_file,
+                                    file_name=m_file,
+                                    display_name=m_file,
+                                )
+                                meas_res = self.client.fetch_iem_measurement(p_base_url, temp_m, p_chan)
+                            except Exception:
+                                meas_res = None
+
+                        if meas_res and len(meas_res[0]) > 0:
+                            pmf, pms = meas_res
+                            eq_resp = compute_composite_response(
+                                bands, np.asarray(pmf, dtype=np.float64), preamp_db=0.0, fs=self.sample_rate
+                            )
+                            res_spls = np.asarray(pms, dtype=np.float64) + eq_resp
+                            tf, ts = (list(pmf), res_spls.tolist())
+                        else:
+                            # Fallback: pure EQ response on standard logarithmic grid
+                            f_grid = np.geomspace(20.0, 20000.0, num=300)
+                            eq_resp = compute_composite_response(
+                                bands, f_grid, preamp_db=0.0, fs=self.sample_rate
+                            )
+                            tf, ts = (f_grid.tolist(), eq_resp.tolist())
+
             self.sigCurvesLoaded.emit((mf, ms), (tf, ts))
         except Exception as e:
             self.sigCurveFailed.emit(str(e))
@@ -159,6 +232,60 @@ class NoScrollComboBox(QtWidgets.QComboBox):
     """
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
         event.ignore()
+
+
+class BandBadgeButton(QtWidgets.QPushButton):
+    """
+    Interactive circular band badge button for the EQ bands table.
+    - Active (ON): Solid white circle with bold black band number.
+    - Bypassed (OFF): Dark zinc circle with dashed border and muted grey band number.
+    - Hover: Subtly glows with PointingHandCursor to indicate clickability.
+    - Clicking toggles bypass state of the band.
+    """
+    def __init__(self, band_id: int, enabled: bool = True, parent=None):
+        super().__init__(parent)
+        self.band_id = band_id
+        self.setProperty("band_id", band_id)
+        self.setCheckable(True)
+        self.setChecked(enabled)
+        self.setFixedSize(24, 24)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("QPushButton { background: transparent; border: none; }")
+        self._update_tooltip()
+        self.toggled.connect(lambda _: self._update_tooltip())
+
+    def _update_tooltip(self) -> None:
+        state = "bypass" if self.isChecked() else "enable"
+        self.setToolTip(f"Band {self.band_id} — Click to {state}")
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect_f = QtCore.QRectF(self.rect())
+        center = rect_f.center()
+        radius = 9.5
+
+        if self.underMouse():
+            painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 30)))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawEllipse(center, radius + 2.0, radius + 2.0)
+
+        if self.isChecked():
+            painter.setBrush(QtGui.QBrush(QtGui.QColor("#ffffff")))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#18181b"), 1.0))
+            painter.drawEllipse(center, radius, radius)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#000000")))
+        else:
+            painter.setBrush(QtGui.QBrush(QtGui.QColor(18, 18, 22)))
+            painter.setPen(QtGui.QPen(QtGui.QColor(180, 180, 190), 1.4, QtCore.Qt.PenStyle.DashLine))
+            painter.drawEllipse(center, radius, radius)
+            painter.setPen(QtGui.QPen(QtGui.QColor(160, 160, 170)))
+
+        font = QtGui.QFont("Segoe UI", 9, QtGui.QFont.Weight.Bold)
+        painter.setFont(font)
+        text_rect = QtCore.QRectF(rect_f)
+        text_rect.translate(0, -1.0)
+        painter.drawText(text_rect, QtCore.Qt.AlignmentFlag.AlignCenter, str(self.band_id))
 
 
 def apply_frameless_window_shadow(widget: QtWidgets.QWidget) -> None:
@@ -437,13 +564,104 @@ class WindowResizeFilter(QtCore.QObject):
         return False
 
 
+class SmoothScrollFilter(QtCore.QObject):
+    """
+    Installs continuous, non-quantised pixel-smooth cubic scrolling on any QAbstractScrollArea.
+    Interpolates mouse wheel and trackpad events using QEasingCurve.Type.OutCubic.
+    """
+    def __init__(self, scroll_area: QtWidgets.QAbstractScrollArea):
+        super().__init__(scroll_area)
+        self.scroll_area = scroll_area
+        self.anim_v = QtCore.QVariantAnimation(self)
+        self.anim_v.setDuration(160)
+        self.anim_v.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self.anim_v.valueChanged.connect(self._on_anim_v_step)
+        self._target_v = 0
+
+        self.anim_h = QtCore.QVariantAnimation(self)
+        self.anim_h.setDuration(160)
+        self.anim_h.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self.anim_h.valueChanged.connect(self._on_anim_h_step)
+        self._target_h = 0
+
+    def _on_anim_v_step(self, val: Any) -> None:
+        self.scroll_area.verticalScrollBar().setValue(int(val))
+
+    def _on_anim_h_step(self, val: Any) -> None:
+        self.scroll_area.horizontalScrollBar().setValue(int(val))
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.Wheel and obj == self.scroll_area.viewport():
+            wheel_event: QtGui.QWheelEvent = event
+            delta_y = wheel_event.angleDelta().y()
+            delta_x = wheel_event.angleDelta().x()
+            handled = False
+
+            if delta_y != 0:
+                bar = self.scroll_area.verticalScrollBar()
+                if bar.maximum() > bar.minimum():
+                    start_val = bar.value()
+                    base = self._target_v if self.anim_v.state() == QtCore.QAbstractAnimation.State.Running else start_val
+                    target = max(bar.minimum(), min(bar.maximum(), base - delta_y))
+                    self._target_v = target
+                    self.anim_v.stop()
+                    self.anim_v.setStartValue(start_val)
+                    self.anim_v.setEndValue(target)
+                    self.anim_v.start()
+                    handled = True
+
+            if delta_x != 0:
+                bar_h = self.scroll_area.horizontalScrollBar()
+                if bar_h.maximum() > bar_h.minimum():
+                    start_val_h = bar_h.value()
+                    base_h = self._target_h if self.anim_h.state() == QtCore.QAbstractAnimation.State.Running else start_val_h
+                    target_h = max(bar_h.minimum(), min(bar_h.maximum(), base_h - delta_x))
+                    self._target_h = target_h
+                    self.anim_h.stop()
+                    self.anim_h.setStartValue(start_val_h)
+                    self.anim_h.setEndValue(target_h)
+                    self.anim_h.start()
+                    handled = True
+
+            if handled:
+                return True
+        return super().eventFilter(obj, event)
+
+
+def make_smooth_scroll(scroll_area: QtWidgets.QAbstractScrollArea) -> None:
+    """Configures scroll area for continuous pixel-smooth scrolling."""
+    if not scroll_area:
+        return
+    if getattr(scroll_area, "_smooth_scroll_installed", False):
+        return
+    scroll_area._smooth_scroll_installed = True
+
+    if isinstance(scroll_area, QtWidgets.QAbstractItemView):
+        scroll_area.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        scroll_area.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+    if scroll_area.viewport():
+        scroll_area.viewport().installEventFilter(SmoothScrollFilter(scroll_area))
+
+
+class AppGlobalScrollFilter(QtCore.QObject):
+    """Monitors for newly shown scroll areas (like combo popups or tables) and ensures smooth scrolling."""
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.Show:
+            if isinstance(obj, QtWidgets.QAbstractScrollArea):
+                make_smooth_scroll(obj)
+            elif isinstance(obj, QtWidgets.QComboBox):
+                if obj.view():
+                    make_smooth_scroll(obj.view())
+        return False
+
+
 class SearchableModelInput(QtWidgets.QLineEdit):
     """
-    Searchable model input with live non-focus-stealing suggestion popup.
-    - Preserves continuous typing focus in the QLineEdit at all times.
-    - Dynamically scales dropdown height to fit the number of matching items (no blank void).
-    - Shows 'No matching models found' when there are 0 matches.
-    - Supports Up/Down arrow navigation, Enter selection, and mouse click.
+    Searchable model input with live suggestion popup powered by QCompleter.
+    - Preserves continuous native typing focus in the QLineEdit.
+    - MatchContains filter mode allows partial/substring searches.
+    - Up/Down arrow keys, Enter selection, mouse click, and down chevron button support.
+    - Fully operational within both top-level windows and modal QDialogs without focus blocking.
     """
     sigModelSelected = QtCore.pyqtSignal(object)  # Emits SquigModel
 
@@ -451,38 +669,48 @@ class SearchableModelInput(QtWidgets.QLineEdit):
         super().__init__(parent)
         self.setPlaceholderText("Search model (e.g. 105, Hexa, HD600)...")
         self._all_models: List[SquigModel] = []
+        self._models_by_name: Dict[str, SquigModel] = {}
         self._selected_model: Optional[SquigModel] = None
 
-        self.popup = QtWidgets.QListWidget()
-        self.popup.setWindowFlags(QtCore.Qt.WindowType.ToolTip | QtCore.Qt.WindowType.FramelessWindowHint)
-        self.popup.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-        self.popup.setStyleSheet("""
-            QListWidget {
+        self.item_model = QtGui.QStandardItemModel(self)
+        self.completer = QtWidgets.QCompleter(self.item_model, self)
+        self.completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
+        self.completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+        self.completer.setMaxVisibleItems(10)
+
+        completer_popup = self.completer.popup()
+        completer_popup.setMinimumWidth(320)
+        completer_popup.setUniformItemSizes(True)
+        completer_popup.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        completer_popup.setStyleSheet("""
+            QListView {
                 background-color: #09090b;
                 border: 1px solid #27272a;
+                border-radius: 4px;
                 color: #ffffff;
                 font-size: 12px;
-                padding: 2px;
+                padding: 3px;
+                outline: none;
             }
-            QListWidget::item {
-                padding: 4px 8px;
-                border-radius: 0px;
-                min-height: 20px;
+            QListView::item {
+                padding: 5px 8px;
+                border-radius: 3px;
+                min-height: 22px;
                 color: #f4f4f5;
             }
-            QListWidget::item:hover, QListWidget::item:selected {
+            QListView::item:hover, QListView::item:selected {
                 background-color: #ffffff;
                 color: #000000;
                 font-weight: 600;
             }
-            QListWidget::item:disabled {
-                color: #71717a;
-                font-style: italic;
-                background-color: transparent;
-            }
         """)
-        self.popup.itemClicked.connect(self._on_item_clicked)
+        make_smooth_scroll(completer_popup)
+        self.setCompleter(self.completer)
+
+        self.completer.activated[QtCore.QModelIndex].connect(self._on_completion_activated)
         self.textEdited.connect(self._on_text_edited)
+        self.returnPressed.connect(self._on_return_pressed)
 
         self._down_arrow_action = self.addAction(
             QtGui.QIcon(CHEVRON_DOWN_PATH),
@@ -490,19 +718,18 @@ class SearchableModelInput(QtWidgets.QLineEdit):
         )
         self._down_arrow_action.triggered.connect(self._toggle_popup)
 
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        super().mousePressEvent(event)
-        if not self.popup.isVisible():
-            self._update_suggestions()
-
-    def _toggle_popup(self) -> None:
-        if self.popup.isVisible():
-            self.popup.hide()
-        else:
-            self._update_suggestions()
+    @property
+    def popup(self) -> QtWidgets.QAbstractItemView:
+        return self.completer.popup()
 
     def set_models(self, models: List[SquigModel]) -> None:
         self._all_models = models or []
+        self._models_by_name = {m.display_name.lower(): m for m in self._all_models}
+        self.item_model.clear()
+        for m in self._all_models:
+            item = QtGui.QStandardItem(m.display_name)
+            item.setData(m, QtCore.Qt.ItemDataRole.UserRole)
+            self.item_model.appendRow(item)
 
     def set_selected_model(self, model: Optional[SquigModel]) -> None:
         self._selected_model = model
@@ -512,10 +739,28 @@ class SearchableModelInput(QtWidgets.QLineEdit):
         else:
             self.clear()
         self.blockSignals(False)
-        self.popup.hide()
+        if self.completer.popup().isVisible():
+            self.completer.popup().hide()
 
     def currentData(self) -> Optional[SquigModel]:
-        return self._selected_model
+        if self._selected_model:
+            return self._selected_model
+        txt = self.text().strip().lower()
+        if txt and hasattr(self, "_models_by_name"):
+            exact = self._models_by_name.get(txt)
+            if exact:
+                return exact
+            for m in getattr(self, "_all_models", []):
+                if m.display_name.lower() == txt or m.name.lower() == txt or m.file_name.lower() == txt:
+                    return m
+            for m in getattr(self, "_all_models", []):
+                if txt in m.display_name.lower():
+                    return m
+        return None
+
+    def focusInEvent(self, event: QtGui.QFocusEvent) -> None:
+        super().focusInEvent(event)
+        QtCore.QTimer.singleShot(0, self.selectAll)
 
     def currentText(self) -> str:
         return self.text().strip()
@@ -523,86 +768,456 @@ class SearchableModelInput(QtWidgets.QLineEdit):
     def lineEdit(self) -> "SearchableModelInput":
         return self
 
-    def _on_text_edited(self, text: str) -> None:
-        q = text.strip().lower()
-        if not q:
-            self.popup.hide()
-            return
-
-        matching = [m for m in self._all_models if q in m.display_name.lower()]
-        self.popup.clear()
-
-        row_h = 24
-        max_visible = 8
-
-        if not matching:
-            item = QtWidgets.QListWidgetItem("No matching models found")
-            item.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
-            self.popup.addItem(item)
-            display_count = 1
+    def _show_suggestions(self, force_all: bool = False) -> None:
+        if force_all or not self.text().strip():
+            self.completer.setCompletionPrefix("")
         else:
-            capped = matching[:60]
-            display_count = min(len(capped), max_visible)
-            for m in capped:
-                item = QtWidgets.QListWidgetItem(m.display_name)
-                item.setData(QtCore.Qt.ItemDataRole.UserRole, m)
-                self.popup.addItem(item)
-            if self.popup.count() > 0:
-                self.popup.setCurrentRow(0)
+            self.completer.setCompletionPrefix(self.text().strip())
+        self.completer.popup().setMinimumWidth(max(self.width(), 320))
+        self.completer.complete()
 
-        total_h = (display_count * row_h) + 6
-        global_pos = self.mapToGlobal(QtCore.QPoint(0, self.height() + 1))
-        self.popup.setGeometry(global_pos.x(), global_pos.y(), self.width(), total_h)
-        self.popup.show()
+    def _toggle_popup(self) -> None:
+        if self.completer.popup().isVisible():
+            self.completer.popup().hide()
+        else:
+            if self._selected_model and self.text().strip() == self._selected_model.display_name:
+                self._show_suggestions(force_all=True)
+            else:
+                self._show_suggestions(force_all=False)
 
-    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
-        key = event.key()
-        if self.popup.isVisible():
-            if key == QtCore.Qt.Key.Key_Down:
-                curr = self.popup.currentRow()
-                if curr < self.popup.count() - 1:
-                    self.popup.setCurrentRow(curr + 1)
-                return
-            elif key == QtCore.Qt.Key.Key_Up:
-                curr = self.popup.currentRow()
-                if curr > 0:
-                    self.popup.setCurrentRow(curr - 1)
-                return
-            elif key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
-                curr_item = self.popup.currentItem()
-                if curr_item and (curr_item.flags() & QtCore.Qt.ItemFlag.ItemIsEnabled):
-                    self._on_item_clicked(curr_item)
-                return
-            elif key == QtCore.Qt.Key.Key_Escape:
-                self.popup.hide()
-                return
+    def _on_text_edited(self, text: str) -> None:
+        if self._selected_model and self._selected_model.display_name != text:
+            self._selected_model = None
+        txt_clean = text.strip()
+        if txt_clean:
+            exact = self._models_by_name.get(txt_clean.lower())
+            if exact and exact != self._selected_model:
+                self._selected_model = exact
+                self.sigModelSelected.emit(exact)
 
-        super().keyPressEvent(event)
+    def _on_return_pressed(self) -> None:
+        if self._selected_model:
+            return
+        if self.completer.popup().isVisible():
+            idx = self.completer.popup().currentIndex()
+            if idx.isValid():
+                self._on_completion_activated(idx)
+                self.completer.popup().hide()
+                return
+        if self.completer.completionCount() == 1:
+            idx0 = self.completer.completionModel().index(0, 0)
+            self._on_completion_activated(idx0)
+            self.completer.popup().hide()
+            return
+        exact = self._models_by_name.get(self.text().strip().lower())
+        if exact:
+            self.set_selected_model(exact)
+            self.sigModelSelected.emit(exact)
 
-    def _on_item_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
+    def _on_completion_activated(self, index: QtCore.QModelIndex) -> None:
+        src_idx = self.completer.completionModel().mapToSource(index)
+        item = self.item_model.itemFromIndex(src_idx)
+        if not item:
+            return
         model = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if model:
             self._selected_model = model
             self.blockSignals(True)
             self.setText(model.display_name)
             self.blockSignals(False)
-            self.popup.hide()
             self.sigModelSelected.emit(model)
+
+
+class SearchableDatabaseInput(QtWidgets.QLineEdit):
+    """
+    Searchable provider/database input with live suggestion popup powered by QCompleter.
+    Matches the UX, styling, and feel of SearchableModelInput, allowing users to type
+    multiple characters to search and filter across all reviewer & aggregator databases.
+    Compatible with QComboBox API (addItem, insertItem, clear, count, itemData, itemText,
+    currentData, currentText, currentIndex, setCurrentIndex, currentIndexChanged, findData, findText).
+    """
+    currentIndexChanged = QtCore.pyqtSignal(int)
+    sigDatabaseSelected = QtCore.pyqtSignal(object)
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setPlaceholderText("Search reviewer database (e.g. Crinacle, Super Review)...")
+        self._items: List[Tuple[str, Any]] = []
+        self._current_index: int = -1
+
+        self.item_model = QtGui.QStandardItemModel(self)
+        self.completer = QtWidgets.QCompleter(self.item_model, self)
+        self.completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
+        self.completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+        self.completer.setMaxVisibleItems(12)
+
+        completer_popup = self.completer.popup()
+        completer_popup.setMinimumWidth(320)
+        completer_popup.setUniformItemSizes(True)
+        completer_popup.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        completer_popup.setStyleSheet("""
+            QListView {
+                background-color: #09090b;
+                border: 1px solid #27272a;
+                border-radius: 4px;
+                color: #ffffff;
+                font-size: 12px;
+                padding: 3px;
+                outline: none;
+            }
+            QListView::item {
+                padding: 5px 8px;
+                border-radius: 3px;
+                min-height: 22px;
+                color: #f4f4f5;
+            }
+            QListView::item:hover, QListView::item:selected {
+                background-color: #ffffff;
+                color: #000000;
+                font-weight: 600;
+            }
+        """)
+        make_smooth_scroll(completer_popup)
+        self.setCompleter(self.completer)
+
+        self.completer.activated[QtCore.QModelIndex].connect(self._on_completion_activated)
+        self.textEdited.connect(self._on_text_edited)
+        self.returnPressed.connect(self._on_return_pressed)
+
+        self._down_arrow_action = self.addAction(
+            QtGui.QIcon(CHEVRON_DOWN_PATH),
+            QtWidgets.QLineEdit.ActionPosition.TrailingPosition
+        )
+        self._down_arrow_action.triggered.connect(self._toggle_popup)
+
+    @property
+    def popup(self) -> QtWidgets.QAbstractItemView:
+        return self.completer.popup()
+
+    def view(self) -> QtWidgets.QAbstractItemView:
+        return self.completer.popup()
+
+    def lineEdit(self) -> "SearchableDatabaseInput":
+        return self
+
+    def clear(self) -> None:
+        self._items.clear()
+        self.item_model.clear()
+        self._current_index = -1
+        self.blockSignals(True)
+        super().clear()
+        self.blockSignals(False)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def insertItem(self, index: int, text: str, data: Any = None) -> None:
+        index = max(0, min(index, len(self._items)))
+        self._items.insert(index, (text, data))
+        item = QtGui.QStandardItem(text)
+        item.setData(data, QtCore.Qt.ItemDataRole.UserRole)
+        self.item_model.insertRow(index, item)
+        if self._current_index >= index:
+            self._current_index += 1
+
+    def addItem(self, text: str, data: Any = None) -> None:
+        self.insertItem(len(self._items), text, data)
+
+    def itemData(self, index: int) -> Any:
+        if 0 <= index < len(self._items):
+            return self._items[index][1]
+        return None
+
+    def itemText(self, index: int) -> str:
+        if 0 <= index < len(self._items):
+            return self._items[index][0]
+        return ""
+
+    def currentIndex(self) -> int:
+        return self._current_index
+
+    def currentData(self) -> Any:
+        if 0 <= self._current_index < len(self._items):
+            return self._items[self._current_index][1]
+        txt = self.text().strip().lower()
+        if txt:
+            for it_text, it_data in self._items:
+                if it_text.lower() == txt:
+                    return it_data
+            for it_text, it_data in self._items:
+                if txt in it_text.lower():
+                    return it_data
+        return None
+
+    def currentText(self) -> str:
+        if 0 <= self._current_index < len(self._items):
+            return self._items[self._current_index][0]
+        return self.text().strip()
+
+    def findData(self, data: Any) -> int:
+        for i, (_, d) in enumerate(self._items):
+            if d == data:
+                return i
+            if isinstance(d, dict) and isinstance(data, dict):
+                if d.get("id") and d.get("id") == data.get("id"):
+                    return i
+        return -1
+
+    def findText(self, text: str) -> int:
+        clean = text.strip().lower()
+        for i, (t, _) in enumerate(self._items):
+            if t.strip().lower() == clean:
+                return i
+        return -1
+
+    def setCurrentIndex(self, index: int) -> None:
+        if 0 <= index < len(self._items):
+            changed = (self._current_index != index)
+            self._current_index = index
+            orig_blocked = self.signalsBlocked()
+            self.blockSignals(True)
+            self.setText(self._items[index][0])
+            self.blockSignals(orig_blocked)
+            if changed and not orig_blocked:
+                self.currentIndexChanged.emit(index)
+                self.sigDatabaseSelected.emit(self._items[index][1])
+        elif index == -1:
+            changed = (self._current_index != -1)
+            self._current_index = -1
+            orig_blocked = self.signalsBlocked()
+            self.blockSignals(True)
+            super().clear()
+            self.blockSignals(orig_blocked)
+            if changed and not orig_blocked:
+                self.currentIndexChanged.emit(-1)
+                self.sigDatabaseSelected.emit(None)
+
+    def _show_suggestions(self, force_all: bool = False) -> None:
+        if force_all or not self.text().strip():
+            self.completer.setCompletionPrefix("")
+        else:
+            self.completer.setCompletionPrefix(self.text().strip())
+        self.completer.popup().setMinimumWidth(max(self.width(), 320))
+        self.completer.complete()
+
+    def _toggle_popup(self) -> None:
+        if self.completer.popup().isVisible():
+            self.completer.popup().hide()
+        else:
+            self.setFocus()
+            self._show_suggestions(force_all=True)
+
+    def _on_completion_activated(self, index: QtCore.QModelIndex) -> None:
+        src_idx = self.completer.completionModel().mapToSource(index)
+        row = src_idx.row()
+        if 0 <= row < len(self._items):
+            self.setCurrentIndex(row)
+
+    def _on_text_edited(self, text: str) -> None:
+        txt_clean = text.strip().lower()
+        for i, (it_text, it_data) in enumerate(self._items):
+            if it_text.lower() == txt_clean:
+                if self._current_index != i:
+                    self._current_index = i
+                    self.currentIndexChanged.emit(i)
+                    self.sigDatabaseSelected.emit(it_data)
+                return
+
+    def _on_return_pressed(self) -> None:
+        if self.completer.popup().isVisible():
+            idx = self.completer.popup().currentIndex()
+            if idx.isValid():
+                self._on_completion_activated(idx)
+                self.completer.popup().hide()
+                return
+        if self.completer.completionCount() == 1:
+            idx0 = self.completer.completionModel().index(0, 0)
+            self._on_completion_activated(idx0)
+            self.completer.popup().hide()
+            return
+        txt = self.text().strip().lower()
+        if not txt:
+            return
+        for i, (it_text, _) in enumerate(self._items):
+            if it_text.lower() == txt:
+                self.setCurrentIndex(i)
+                return
+        for i, (it_text, _) in enumerate(self._items):
+            if it_text.lower().startswith(txt):
+                self.setCurrentIndex(i)
+                return
+        for i, (it_text, _) in enumerate(self._items):
+            if txt in it_text.lower():
+                self.setCurrentIndex(i)
+                return
+
+    def focusInEvent(self, event: QtGui.QFocusEvent) -> None:
+        super().focusInEvent(event)
+        QtCore.QTimer.singleShot(0, self.selectAll)
 
     def focusOutEvent(self, event: QtGui.QFocusEvent) -> None:
         super().focusOutEvent(event)
-        try:
-            QtCore.QTimer.singleShot(160, self.popup.hide)
-        except Exception:
-            pass
+        if 0 <= self._current_index < len(self._items):
+            if self.text().strip() != self._items[self._current_index][0]:
+                txt = self.text().strip().lower()
+                matched = -1
+                for i, (it_text, _) in enumerate(self._items):
+                    if it_text.lower() == txt:
+                        matched = i
+                        break
+                if matched != -1:
+                    self.setCurrentIndex(matched)
+                else:
+                    self.blockSignals(True)
+                    self.setText(self._items[self._current_index][0])
+                    self.blockSignals(False)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() in (QtCore.Qt.Key.Key_Down, QtCore.Qt.Key.Key_F4):
+            if not self.completer.popup().isVisible():
+                self._show_suggestions(force_all=True)
+                return
+        super().keyPressEvent(event)
 
     def hideEvent(self, event: QtGui.QHideEvent) -> None:
         super().hideEvent(event)
         try:
-            if hasattr(self, 'popup'):
-                self.popup.hide()
+            if hasattr(self, "completer") and self.completer.popup().isVisible():
+                self.completer.popup().hide()
         except Exception:
             pass
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() in (QtCore.Qt.Key.Key_Down, QtCore.Qt.Key.Key_F4):
+            if not self.completer.popup().isVisible():
+                self._show_suggestions(force_all=False)
+                return
+        super().keyPressEvent(event)
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        super().hideEvent(event)
+        try:
+            if hasattr(self, "completer") and self.completer.popup().isVisible():
+                self.completer.popup().hide()
+        except Exception:
+            pass
+
+
+class SearchableTargetIEMInput(SearchableModelInput):
+    """
+    Searchable model input specifically for Target IEM/headphone selection.
+    Supports:
+    - Same provider mode: searches models from the active reviewer database.
+    - Global search mode: searches across all 43,000+ catalog models, prioritizing
+      measurements from the current active provider at the very top.
+    """
+    def __init__(self, squig_client: Optional[SquigClient] = None, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.squig_client = squig_client
+        self.setPlaceholderText("Search target IEM to clone (e.g. HD600, Chu II)...")
+        self.same_provider_only: bool = True
+        self.current_provider_base_url: str = ""
+        self.current_provider_name: str = ""
+        self.current_provider_rig: str = ""
+
+        self._global_search_timer = QtCore.QTimer(self)
+        self._global_search_timer.setSingleShot(True)
+        self._global_search_timer.setInterval(120)
+        self._global_search_timer.timeout.connect(self._do_global_search)
+
+    def set_provider_info(self, base_url: str, provider_name: str, rig: str = "") -> None:
+        self.current_provider_base_url = (base_url or "").rstrip("/")
+        self.current_provider_name = provider_name
+        self.current_provider_rig = rig
+
+    def set_same_provider_only(self, enabled: bool) -> None:
+        self.same_provider_only = enabled
+        if enabled:
+            # Restore model suggestions to active database models
+            self.set_models(self._all_models)
+        else:
+            txt = self.text().strip()
+            if txt:
+                self._global_search_timer.start(50)
+
+    def _on_text_edited(self, text: str) -> None:
+        if self._selected_model and self._selected_model.display_name != text:
+            self._selected_model = None
+
+        if self.same_provider_only:
+            super()._on_text_edited(text)
+        else:
+            txt_clean = text.strip()
+            if txt_clean:
+                self._global_search_timer.start(120)
+            else:
+                self.set_models(self._all_models)
+
+    def _do_global_search(self) -> None:
+        if self.same_provider_only or not self.squig_client:
+            return
+        query = self.text().strip()
+        if not query:
+            return
+        results = self.squig_client.search_global_catalog(query, limit=120)
+        if not results:
+            return
+
+        # Prioritize measurements from the same provider!
+        curr_url = self.current_provider_base_url.lower()
+        same_prov: List[GlobalSearchResult] = []
+        other_prov: List[GlobalSearchResult] = []
+        for r in results:
+            if curr_url and r.base_url.rstrip("/").lower() == curr_url:
+                same_prov.append(r)
+            else:
+                other_prov.append(r)
+
+        sorted_results = same_prov + other_prov
+
+        self.item_model.clear()
+        self._models_by_name.clear()
+        for r in sorted_results:
+            is_same = bool(curr_url and r.base_url.rstrip("/").lower() == curr_url)
+            tag = "★ Same Provider" if is_same else r.provider_name
+            disp_item = f"{r.full_name}  [{tag}]"
+            m = SquigModel(
+                brand=r.brand,
+                name=r.name,
+                full_name=r.full_name,
+                file_name=r.file_name,
+                display_name=r.full_name,
+            )
+            # Attach dynamic provider metadata
+            m.base_url = r.base_url
+            m.provider_name = r.provider_name
+            m.rig = r.rig
+
+            self._models_by_name[r.full_name.lower()] = m
+            self._models_by_name[disp_item.lower()] = m
+
+            item = QtGui.QStandardItem(disp_item)
+            item.setData(m, QtCore.Qt.ItemDataRole.UserRole)
+            self.item_model.appendRow(item)
+
+        if self.hasFocus():
+            self.completer.setCompletionPrefix("")
+            self.completer.popup().setMinimumWidth(max(self.width(), 360))
+            self.completer.complete()
+
+    def _on_completion_activated(self, index: QtCore.QModelIndex) -> None:
+        src_idx = self.completer.completionModel().mapToSource(index)
+        item = self.item_model.itemFromIndex(src_idx)
+        if not item:
+            return
+        model = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if model:
+            self._selected_model = model
+            self.blockSignals(True)
+            self.setText(model.display_name)
+            self.blockSignals(False)
+            self.sigModelSelected.emit(model)
 
 
 # -----------------------------------------------------------------------------
@@ -615,12 +1230,19 @@ class SegmentedPillTabBar(QtWidgets.QWidget):
     """
     sigTabChanged = QtCore.pyqtSignal(int)
 
-    def __init__(self, tabs: List[str], parent: Optional[QtWidgets.QWidget] = None):
+    def __init__(
+        self,
+        tabs: List[str],
+        parent: Optional[QtWidgets.QWidget] = None,
+        height: int = 34,
+        font_size: int = 10,
+    ):
         super().__init__(parent)
         self.tabs = tabs
         self._current_index = 0
         self._pill_pos = 0.0
-        self.setFixedHeight(34)
+        self._font_size = font_size
+        self.setFixedHeight(height)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
 
         self._anim = QtCore.QVariantAnimation(self)
@@ -672,14 +1294,14 @@ class SegmentedPillTabBar(QtWidgets.QWidget):
         pill_h = h - (padding * 2.0)
         pill_x = padding + (self._pill_pos * tab_w)
         pill_y = padding
-        pill_radius = 6.0
+        pill_radius = max(3.0, track_radius - 2.0)
 
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
         painter.setBrush(QtGui.QColor("#f4f4f5"))  # Studio clean white/off-white
         painter.drawRoundedRect(QtCore.QRectF(pill_x, pill_y, pill_w, pill_h), pill_radius, pill_radius)
 
         # Tab text labels
-        font = QtGui.QFont("Segoe UI", 10, QtGui.QFont.Weight.Bold)
+        font = QtGui.QFont("Segoe UI", self._font_size, QtGui.QFont.Weight.Bold)
         font.setLetterSpacing(QtGui.QFont.SpacingType.AbsoluteSpacing, 0.5)
         painter.setFont(font)
 
@@ -797,11 +1419,226 @@ class ApoDeviceConfigDialog(QtWidgets.QDialog):
         apply_frameless_window_shadow(self)
 
     def _launch_configurator(self) -> None:
+        if not self.configurator_path or not os.path.exists(self.configurator_path):
+            if not is_equalizer_apo_installed():
+                dlg = EqualizerApoInstallDialog(self.parent())
+                dlg.exec()
+                return
         ok, msg = launch_apo_configurator(self.configurator_path)
         if ok:
             self.accept()
         else:
             QtWidgets.QMessageBox.warning(self, "Launch Error", f"Could not launch Configurator: {msg}")
+
+
+class EqualizerApoInstallDialog(QtWidgets.QDialog):
+    """
+    Studio setup modal shown when Equalizer APO is not installed on the system.
+    Provides one-click installation using the bundled Equalizer APO installer,
+    real-time installation polling, automatic config linking, and audio device setup.
+    """
+    sigInstalled = QtCore.pyqtSignal()
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.Dialog)
+        self.setWindowTitle("Equalizer APO Setup - Clean APO")
+        self.setFixedSize(520, 360)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #09090b;
+                border: 1px solid #27272a;
+                border-radius: 8px;
+            }
+            QLabel {
+                color: #e4e4e7;
+                font-family: 'Segoe UI';
+            }
+            QPushButton {
+                background: #18181b;
+                border: 1px solid #27272a;
+                border-radius: 4px;
+                color: #f4f4f5;
+                padding: 7px 16px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #27272a;
+                border-color: #3f3f46;
+            }
+            QPushButton#primaryInstallBtn {
+                background: #ffffff;
+                color: #09090b;
+                border: 1px solid #ffffff;
+                font-weight: 700;
+            }
+            QPushButton#primaryInstallBtn:hover {
+                background: #e4e4e7;
+            }
+            QCheckBox {
+                color: #71717a;
+                font-size: 11px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #3f3f46;
+                border-radius: 3px;
+                background: #18181b;
+            }
+            QCheckBox::indicator:checked {
+                background: #38bdf8;
+                border-color: #38bdf8;
+            }
+        """)
+
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        title_bar = DialogTitleBar(self, "Equalizer APO Setup")
+        main_layout.addWidget(title_bar)
+
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(22, 18, 22, 20)
+        layout.setSpacing(12)
+        main_layout.addWidget(content)
+
+        # Header Title
+        title_box = QtWidgets.QHBoxLayout()
+        title_box.setSpacing(8)
+
+        self.header_title = QtWidgets.QLabel("Equalizer APO is Required")
+        self.header_title.setStyleSheet("font-size: 15px; font-weight: 700; color: #ffffff;")
+        title_box.addWidget(self.header_title)
+        title_box.addStretch()
+        layout.addLayout(title_box)
+
+        # Description
+        self.desc_lbl = QtWidgets.QLabel(
+            "Clean APO applies low-latency, real-time parametric EQ across all Windows audio "
+            "(Spotify, YouTube, games, voice chat) via the Equalizer APO audio engine.\n\n"
+            "Equalizer APO was not detected on this system. The official installer is bundled "
+            "directly with Clean APO for instant setup."
+        )
+        self.desc_lbl.setStyleSheet("font-size: 11.5px; color: #a1a1aa; line-height: 1.45;")
+        self.desc_lbl.setWordWrap(True)
+        layout.addWidget(self.desc_lbl)
+
+        # Features box
+        features_box = QtWidgets.QFrame()
+        features_box.setStyleSheet("background: #141417; border: 1px solid #27272a; border-radius: 6px; padding: 6px 10px;")
+        f_layout = QtWidgets.QVBoxLayout(features_box)
+        f_layout.setSpacing(5)
+
+        b1 = QtWidgets.QLabel("• Official Equalizer APO x64 v1.4.2 bundled")
+        b1.setStyleSheet("color: #d4d4d8; font-size: 11px;")
+        f_layout.addWidget(b1)
+
+        b2 = QtWidgets.QLabel("• Automatically connects 'clean_apo_generated.txt' into main config")
+        b2.setStyleSheet("color: #d4d4d8; font-size: 11px;")
+        f_layout.addWidget(b2)
+
+        b3 = QtWidgets.QLabel("• Configurator will open so you can select your Headphones or Speakers")
+        b3.setStyleSheet("color: #d4d4d8; font-size: 11px;")
+        f_layout.addWidget(b3)
+        layout.addWidget(features_box)
+
+        # Status / Progress label
+        self.status_msg = QtWidgets.QLabel("")
+        self.status_msg.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 600;")
+        self.status_msg.setWordWrap(True)
+        self.status_msg.setVisible(False)
+        layout.addWidget(self.status_msg)
+
+        layout.addStretch()
+
+        # Checkbox: Don't ask again
+        self.chk_dont_ask = QtWidgets.QCheckBox("Do not prompt again on startup")
+        layout.addWidget(self.chk_dont_ask)
+
+        # Button row
+        self.btn_row = QtWidgets.QHBoxLayout()
+        self.btn_row.setSpacing(8)
+
+        self.install_btn = QtWidgets.QPushButton("Install Equalizer APO")
+        self.install_btn.setObjectName("primaryInstallBtn")
+        self.install_btn.clicked.connect(self._start_installation)
+        self.btn_row.addWidget(self.install_btn)
+
+        self.launch_cfg_btn = QtWidgets.QPushButton("Launch Configurator")
+        self.launch_cfg_btn.setVisible(False)
+        self.launch_cfg_btn.clicked.connect(self._launch_configurator)
+        self.btn_row.addWidget(self.launch_cfg_btn)
+
+        self.dismiss_btn = QtWidgets.QPushButton("Continue Offline")
+        self.dismiss_btn.clicked.connect(self._on_dismiss)
+        self.btn_row.addWidget(self.dismiss_btn)
+
+        layout.addLayout(self.btn_row)
+
+        self._poll_timer = QtCore.QTimer(self)
+        self._poll_timer.setInterval(1200)
+        self._poll_timer.timeout.connect(self._check_installation_polling)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        apply_frameless_window_shadow(self)
+
+    def _start_installation(self) -> None:
+        ok, msg = launch_apo_installer()
+        if not ok:
+            self.status_msg.setText(f"Install Notice: {msg}")
+            self.status_msg.setStyleSheet("color: #f87171; font-size: 11px; font-weight: 600;")
+            self.status_msg.setVisible(True)
+            return
+
+        self.install_btn.setEnabled(False)
+        self.install_btn.setText("Installer Running...")
+        self.status_msg.setText("Setup launched! Please follow the installer prompts, check your audio devices, and click Finish.")
+        self.status_msg.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 600;")
+        self.status_msg.setVisible(True)
+        self._poll_timer.start()
+
+    def _check_installation_polling(self) -> None:
+        if is_equalizer_apo_installed():
+            self._poll_timer.stop()
+            self._on_installation_complete()
+
+    def _on_installation_complete(self) -> None:
+        ensure_apo_root_config_include(DEFAULT_APO_PATH)
+        self.header_title.setText("Equalizer APO Ready!")
+        self.desc_lbl.setText(
+            "Equalizer APO was installed and linked to Clean APO successfully!\n\n"
+            "Clean APO is now actively sending real-time parametric EQ directly to your Windows audio devices."
+        )
+        self.status_msg.setText("✓ Active & Connected (clean_apo_generated.txt)")
+        self.status_msg.setStyleSheet("color: #4ade80; font-size: 12px; font-weight: 700;")
+        self.status_msg.setVisible(True)
+
+        self.install_btn.setVisible(False)
+        self.launch_cfg_btn.setVisible(True)
+        self.dismiss_btn.setText("Done")
+        self.dismiss_btn.setObjectName("primaryInstallBtn")
+        self.dismiss_btn.setStyleSheet("""
+            background: #ffffff;
+            color: #09090b;
+            border: 1px solid #ffffff;
+            font-weight: 700;
+        """)
+        self.sigInstalled.emit()
+
+    def _launch_configurator(self) -> None:
+        cfg = get_apo_configurator_path()
+        if cfg:
+            launch_apo_configurator(cfg)
+        self.accept()
+
+    def _on_dismiss(self) -> None:
+        self._poll_timer.stop()
+        self.accept()
 
 
 # -----------------------------------------------------------------------------
@@ -1064,6 +1901,21 @@ QPushButton#dangerBtn:hover {
     border-color: #ef4444;
 }
 
+QPushButton#presetCurvesBtn {
+    background-color: #121215;
+    color: #e4e4e7;
+    border: 1px solid #27272a;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 8px;
+}
+QPushButton#presetCurvesBtn:hover {
+    background-color: #1e1e24;
+    border-color: #38bdf8;
+    color: #38bdf8;
+}
+
 /* Minimalist Table Delete Button ("X" turns red on hover) */
 QPushButton.tableDeleteBtn {
     background-color: transparent;
@@ -1213,6 +2065,16 @@ QTableWidget QSpinBox,
 QTableWidget QDoubleSpinBox,
 QTableWidget QComboBox {
     border-radius: 0px;
+}
+QTableWidget QComboBox {
+    border: 1px solid transparent;
+    background-color: transparent;
+}
+QTableWidget QComboBox:hover {
+    border: 1px solid transparent;
+}
+QTableWidget QComboBox:focus {
+    border: 1px solid transparent;
 }
 QHeaderView::section {
     background-color: #000000;
@@ -1440,6 +2302,7 @@ class AnimatedPresetListWidget(QtWidgets.QListWidget):
         self._anim.valueChanged.connect(self._on_anim_step)
         self.currentItemChanged.connect(lambda *_: self.animate_to_current())
         self.verticalScrollBar().valueChanged.connect(lambda: self.animate_to_current(immediate=True))
+        make_smooth_scroll(self)
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
@@ -1556,16 +2419,36 @@ class SettingsDialog(QtWidgets.QDialog):
         self.status_label.setStyleSheet("font-weight: 500;")
         layout.addWidget(self.status_label)
 
-        # Equalizer APO Configurator launch row
+        # Equalizer APO Status & Configurator/Installer launch row
+        apo_installed = is_equalizer_apo_installed()
         apo_row = QtWidgets.QHBoxLayout()
-        apo_lbl = QtWidgets.QLabel("Equalizer APO Device Setup:")
-        apo_lbl.setStyleSheet("color: #a1a1aa; font-weight: 600;")
-        apo_row.addWidget(apo_lbl)
-        apo_btn = QtWidgets.QPushButton("Launch Equalizer APO Configurator")
-        apo_btn.setFixedHeight(28)
-        apo_btn.setToolTip("Open Equalizer APO Device Selector / Configurator")
-        apo_btn.clicked.connect(launch_apo_configurator)
-        apo_row.addWidget(apo_btn)
+        if apo_installed:
+            stat_dot = QtWidgets.QLabel("●")
+            stat_dot.setStyleSheet("color: #4ade80; font-size: 11px;")
+            stat_lbl = QtWidgets.QLabel("Equalizer APO: Connected & Active")
+            stat_lbl.setStyleSheet("color: #4ade80; font-weight: 600; font-size: 11.5px;")
+            apo_row.addWidget(stat_dot)
+            apo_row.addWidget(stat_lbl)
+            apo_row.addStretch()
+            apo_btn = QtWidgets.QPushButton("Launch Configurator")
+            apo_btn.setFixedHeight(28)
+            apo_btn.setToolTip("Open Equalizer APO Device Selector / Configurator")
+            apo_btn.clicked.connect(lambda: launch_apo_configurator())
+            apo_row.addWidget(apo_btn)
+        else:
+            stat_dot = QtWidgets.QLabel("○")
+            stat_dot.setStyleSheet("color: #f59e0b; font-size: 11px;")
+            stat_lbl = QtWidgets.QLabel("Equalizer APO: Not Installed")
+            stat_lbl.setStyleSheet("color: #f59e0b; font-weight: 600; font-size: 11.5px;")
+            apo_row.addWidget(stat_dot)
+            apo_row.addWidget(stat_lbl)
+            apo_row.addStretch()
+            apo_btn = QtWidgets.QPushButton("Install Equalizer APO")
+            apo_btn.setObjectName("primaryBtn")
+            apo_btn.setFixedHeight(28)
+            apo_btn.setToolTip("Install bundled Equalizer APO x64 installer")
+            apo_btn.clicked.connect(self._open_installer_dialog)
+            apo_row.addWidget(apo_btn)
         layout.addLayout(apo_row)
 
         btn_row = QtWidgets.QHBoxLayout()
@@ -1600,6 +2483,12 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         if path:
             self.path_edit.setText(path)
+
+    def _open_installer_dialog(self) -> None:
+        dlg = EqualizerApoInstallDialog(self)
+        dlg.exec()
+        if is_equalizer_apo_installed():
+            self.path_edit.setText(DEFAULT_APO_PATH)
 
     def _test_permissions(self) -> None:
         path = self.path_edit.text().strip()
@@ -1636,6 +2525,7 @@ class GlobalSearchDialog(QtWidgets.QDialog):
         self.client = squig_client
         self.preset_manager = preset_manager
         self.selected_result: Optional[GlobalSearchResult] = None
+        self.load_role: str = "source"
         self._current_results: List[GlobalSearchResult] = []
 
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.Dialog)
@@ -1792,6 +2682,7 @@ class GlobalSearchDialog(QtWidgets.QDialog):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
+        make_smooth_scroll(self.table)
         self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
         self.table.doubleClicked.connect(self._on_row_double_clicked)
         layout.addWidget(self.table, stretch=1)
@@ -1828,6 +2719,12 @@ class GlobalSearchDialog(QtWidgets.QDialog):
         btn_layout.addWidget(self.sync_db_btn)
 
         btn_layout.addStretch()
+
+        self.load_target_btn = QtWidgets.QPushButton("Load as Target IEM")
+        self.load_target_btn.setEnabled(False)
+        self.load_target_btn.setToolTip("Load this model into AutoEQ as the target response to clone")
+        self.load_target_btn.clicked.connect(self._on_load_target_clicked)
+        btn_layout.addWidget(self.load_target_btn)
 
         self.load_btn = QtWidgets.QPushButton("Load Selected Model into AutoEQ")
         self.load_btn.setObjectName("primaryBtn")
@@ -1948,6 +2845,7 @@ class GlobalSearchDialog(QtWidgets.QDialog):
         if res:
             self.selected_result = res
             self.load_btn.setEnabled(True)
+            self.load_target_btn.setEnabled(True)
             self.selected_model_lbl.setText(
                 f"Selected: {res.full_name or res.file_name}  •  Provider: {res.provider_name} ({res.rig})"
             )
@@ -1959,15 +2857,23 @@ class GlobalSearchDialog(QtWidgets.QDialog):
         else:
             self.selected_result = None
             self.load_btn.setEnabled(False)
+            self.load_target_btn.setEnabled(False)
             self.selected_model_lbl.setText("No measurement selected.")
             self.targets_list_lbl.setText("Targets: None")
 
     def _on_row_double_clicked(self) -> None:
         if self.selected_result:
+            self.load_role = "source"
             self.accept()
 
     def _on_load_clicked(self) -> None:
         if self.selected_result:
+            self.load_role = "source"
+            self.accept()
+
+    def _on_load_target_clicked(self) -> None:
+        if self.selected_result:
+            self.load_role = "target"
             self.accept()
 
     def _open_offline_sync(self) -> None:
@@ -1988,7 +2894,7 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         target = parent
         while target is not None and not hasattr(target, "offline_sync_worker"):
             target = target.parent()
-        self.main_win = target if target is not None else parent
+        self.main_win = target if target is not None else (parent.window() if parent else None)
 
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.Dialog)
         self.setWindowTitle("Offline Database Sync")
@@ -2082,6 +2988,17 @@ class OfflineSyncDialog(QtWidgets.QDialog):
             QPushButton#stopActionBtn:hover {
                 background: #3f3f46;
                 color: #ef4444;
+            }
+            QPushButton#dangerBtn {
+                background: transparent;
+                color: #f87171;
+                border: 1px solid #7f1d1d;
+                font-weight: 600;
+            }
+            QPushButton#dangerBtn:hover {
+                background: #450a0a;
+                border-color: #ef4444;
+                color: #fca5a5;
             }
             QFrame#statCard {
                 background-color: #121215;
@@ -2235,24 +3152,30 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         layout.addLayout(prog_box)
         layout.addStretch()
 
+        # Background Download Disclaimer
+        self.disclaimer_lbl = QtWidgets.QLabel(
+            "Closing this window will not interrupt the download; it will continue in the background."
+        )
+        self.disclaimer_lbl.setStyleSheet("font-size: 10px; color: #a1a1aa; font-style: italic;")
+        self.disclaimer_lbl.setWordWrap(True)
+        layout.addWidget(self.disclaimer_lbl)
+
         # Action Buttons
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.setSpacing(8)
+
+        self.delete_btn = QtWidgets.QPushButton("Delete Database")
+        self.delete_btn.setObjectName("dangerBtn")
+        self.delete_btn.setToolTip("Delete local database cache to free up storage or re-download from scratch")
+        self.delete_btn.clicked.connect(self._delete_database)
+        btn_row.addWidget(self.delete_btn)
+
+        btn_row.addStretch()
 
         self.start_btn = QtWidgets.QPushButton("Start Sync")
         self.start_btn.setObjectName("primaryActionBtn")
         self.start_btn.clicked.connect(self._toggle_sync)
         btn_row.addWidget(self.start_btn)
-
-        self.pause_btn = QtWidgets.QPushButton("Pause")
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.clicked.connect(self._toggle_pause)
-        btn_row.addWidget(self.pause_btn)
-
-        self.bg_btn = QtWidgets.QPushButton("Run in Background")
-        self.bg_btn.setToolTip("Keep downloading in the background while you use Clean APO")
-        self.bg_btn.clicked.connect(self.accept)
-        btn_row.addWidget(self.bg_btn)
 
         self.close_btn = QtWidgets.QPushButton("Close")
         self.close_btn.clicked.connect(self.accept)
@@ -2287,6 +3210,33 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         self.target_stat_val.setText(f"{stats['targets']:,} / 1,875")
         self.size_stat_val.setText(f"{stats['size_mb']} MB")
 
+    def _delete_database(self) -> None:
+        worker = getattr(self.main_win, "offline_sync_worker", None) if self.main_win else None
+        if worker and worker.isRunning():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Sync Active",
+                "Please stop the current sync before deleting the database.",
+            )
+            return
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Delete Database",
+            "Are you sure you want to delete all cached measurements and targets?\n\n"
+            "This will delete your local offline database cache to free up storage, allowing you to re-download from scratch.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.offline_db.clear_all()
+            self._refresh_stats()
+            self.progress_bar.setValue(0)
+            self.phase_lbl.setText("Database deleted.")
+            self.detail_lbl.setText("All local cached curves and targets have been cleared.")
+            if self.main_win and hasattr(self.main_win, "_update_offline_db_badge"):
+                self.main_win._update_offline_db_badge()
+
     def _attach_worker(self, worker: OfflineSyncWorker) -> None:
         worker.sigPhaseChanged.connect(self._on_phase_changed)
         worker.sigProgress.connect(self._on_progress)
@@ -2297,29 +3247,39 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         self.start_btn.setText("Stop")
         self.start_btn.setObjectName("stopActionBtn")
         self.start_btn.setStyleSheet("background: #27272a; color: #f87171; border: 1px solid #3f3f46; font-weight: 700;")
-        self.pause_btn.setEnabled(True)
-        self.pause_btn.setText("Resume" if worker.is_paused() else "Pause")
         self.phase_lbl.setText("Syncing in progress...")
         self.scope_list.setEnabled(False)
 
     def _toggle_sync(self) -> None:
         worker = getattr(self.main_win, "offline_sync_worker", None) if self.main_win else None
         if worker and worker.isRunning():
+            self.start_btn.setEnabled(False)
+            self.start_btn.setText("Stopping...")
+            QtWidgets.QApplication.processEvents()
             worker.cancel()
-            worker.wait(500)
+            worker.wait(800)
+            self.start_btn.setEnabled(True)
             self.start_btn.setText("Start Sync")
             self.start_btn.setObjectName("primaryActionBtn")
             self.start_btn.setStyleSheet("")
-            self.pause_btn.setEnabled(False)
             self.phase_lbl.setText("Sync stopped.")
             self.scope_list.setEnabled(True)
             self._refresh_stats()
-            if self.main_win:
+            if self.main_win and hasattr(self.main_win, "_update_offline_db_badge"):
                 self.main_win._update_offline_db_badge()
             return
 
         cur_item = self.scope_list.currentItem()
         scope = cur_item.data(QtCore.Qt.ItemDataRole.UserRole) if cur_item else "essential"
+
+        # Immediate responsive feedback
+        self.start_btn.setText("Stop")
+        self.start_btn.setObjectName("stopActionBtn")
+        self.start_btn.setStyleSheet("background: #27272a; color: #f87171; border: 1px solid #3f3f46; font-weight: 700;")
+        self.phase_lbl.setText("Initializing sync...")
+        self.detail_lbl.setText("Connecting to database servers...")
+        self.scope_list.setEnabled(False)
+        QtWidgets.QApplication.processEvents()
 
         new_worker = OfflineSyncWorker(self.client, scope=scope, max_workers=24, parent=self.main_win)
         if self.main_win:
@@ -2329,19 +3289,6 @@ class OfflineSyncDialog(QtWidgets.QDialog):
 
         self._attach_worker(new_worker)
         new_worker.start()
-
-    def _toggle_pause(self) -> None:
-        worker = getattr(self.main_win, "offline_sync_worker", None) if self.main_win else None
-        if not worker or not worker.isRunning():
-            return
-        if worker.is_paused():
-            worker.resume()
-            self.pause_btn.setText("Pause")
-            self.phase_lbl.setText("Resuming sync...")
-        else:
-            worker.pause()
-            self.pause_btn.setText("Resume")
-            self.phase_lbl.setText("Sync paused.")
 
     def _on_phase_changed(self, phase: str) -> None:
         self.phase_lbl.setText(phase)
@@ -2360,9 +3307,7 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         self.start_btn.setText("Start Sync")
         self.start_btn.setObjectName("primaryActionBtn")
         self.start_btn.setStyleSheet("")
-        self.pause_btn.setEnabled(False)
         self.scope_list.setEnabled(True)
-        self.progress_bar.setValue(100)
         self.progress_bar.setValue(100)
         self.phase_lbl.setText("Sync complete! Curves available offline.")
         self.phase_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #ffffff;")
@@ -2373,13 +3318,602 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         self.start_btn.setText("Start Sync")
         self.start_btn.setObjectName("primaryActionBtn")
         self.start_btn.setStyleSheet("")
-        self.pause_btn.setEnabled(False)
+        self.scope_list.setEnabled(True)
         self.phase_lbl.setText(f"Error: {err}")
         self.phase_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #f87171;")
 
 
+class ProfileCurveAssignmentDialog(QtWidgets.QDialog):
+    """
+    Dialog to assign or edit consistent measurement and target reference curves for any EQ profile.
+    Enforces strict reviewer database / coupler rig consistency so that both the IEM/headphone
+    measurement and the target curve originate from the exact same provider.
+    """
+    def __init__(
+        self,
+        client: SquigClient,
+        preset_manager: PresetManager,
+        preset_name: str,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.client = client
+        self.preset_manager = preset_manager
+        self.preset_name = preset_name
+        self.existing_meta = self.preset_manager.get_preset_metadata(preset_name) or {}
+
+        self._db_worker: Optional[DatabaseIndexWorker] = None
+        self._current_models: List[SquigModel] = []
+        self._current_targets: List[SquigTarget] = []
+        self._pending_model_file: Optional[str] = (
+            self.existing_meta.get("model_file") or self.existing_meta.get("model_name")
+        )
+        self._pending_target_file: Optional[str] = (
+            self.existing_meta.get("target_file") or self.existing_meta.get("target_name")
+        )
+        self._pending_target2_file: Optional[str] = (
+            self.existing_meta.get("target2_file") or self.existing_meta.get("target2_name")
+        )
+        self._selected_chan: str = self.existing_meta.get("channel_mode", "avg")
+
+        self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.Dialog)
+        self.setWindowTitle(f"Target & Measurement — {preset_name}")
+        self.resize(640, 560)
+        self.setMinimumSize(560, 500)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #09090b;
+                border: 1px solid #27272a;
+                border-radius: 8px;
+                color: #f4f4f5;
+            }
+            QLabel {
+                color: #f4f4f5;
+                background: transparent;
+            }
+            QLineEdit {
+                background-color: #18181b;
+                border: 1px solid #27272a;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px 10px;
+                font-size: 12px;
+                selection-background-color: #ffffff;
+                selection-color: #000000;
+            }
+            QLineEdit:focus {
+                border: 1px solid #38bdf8;
+            }
+            QComboBox {
+                background-color: #18181b;
+                border: 1px solid #27272a;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px 24px 6px 10px;
+                font-size: 12px;
+            }
+            QComboBox:hover {
+                border-color: #3f3f46;
+            }
+            QComboBox:focus {
+                border-color: #38bdf8;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 22px;
+                border-left-width: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #09090b;
+                border: 1px solid #27272a;
+                color: #ffffff;
+                selection-background-color: #ffffff;
+                selection-color: #000000;
+                outline: none;
+                padding: 2px;
+            }
+            QPushButton {
+                background-color: #18181b;
+                border: 1px solid #27272a;
+                border-radius: 4px;
+                color: #f4f4f5;
+                padding: 7px 14px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #27272a;
+                border-color: #3f3f46;
+            }
+            QPushButton#primaryBtn {
+                background-color: #ffffff;
+                color: #000000;
+                border: 1px solid #ffffff;
+                font-weight: 700;
+            }
+            QPushButton#primaryBtn:hover {
+                background-color: #e4e4e7;
+            }
+            QPushButton#dangerBtn {
+                background-color: #1c1012;
+                color: #f87171;
+                border: 1px solid #7f1d1d;
+            }
+            QPushButton#dangerBtn:hover {
+                background-color: #ef4444;
+                color: #ffffff;
+                border-color: #ef4444;
+            }
+        """)
+
+        self._init_ui()
+        self._populate_providers()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        apply_frameless_window_shadow(self)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self._db_worker and self._db_worker.isRunning():
+            self._db_worker.quit()
+            self._db_worker.wait(300)
+        super().closeEvent(event)
+
+    def _init_ui(self) -> None:
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Title bar
+        title_bar = DialogTitleBar(self, f"Target & Measurement Reference — {self.preset_name}")
+        main_layout.addWidget(title_bar)
+
+        # Body container
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(12)
+
+        # Top banner describing the target & measurement concept
+        banner_box = QtWidgets.QFrame()
+        banner_box.setStyleSheet("""
+            QFrame {
+                background-color: #121215;
+                border: 1px solid #27272a;
+                border-radius: 6px;
+                padding: 6px 10px;
+            }
+        """)
+        banner_layout = QtWidgets.QVBoxLayout(banner_box)
+        banner_layout.setContentsMargins(4, 4, 4, 4)
+        banner_layout.setSpacing(2)
+
+        p_lbl = QtWidgets.QLabel(f"EQ Profile: <span style='color: #ffffff; font-weight: 700;'>{self.preset_name}</span>")
+        p_lbl.setStyleSheet("font-size: 13px; color: #a1a1aa;")
+        banner_layout.addWidget(p_lbl)
+
+        p_desc = QtWidgets.QLabel(
+            "Attach a headphone measurement and compensation target to view the raw curve, "
+            "reference target, and live resultant response alongside your EQ filters."
+        )
+        p_desc.setStyleSheet("font-size: 11px; color: #71717a;")
+        p_desc.setWordWrap(True)
+        banner_layout.addWidget(p_desc)
+        layout.addWidget(banner_box)
+
+        # Provider / Reviewer Database selection
+        sec_prov = QtWidgets.QVBoxLayout()
+        sec_prov.setSpacing(4)
+        prov_head = QtWidgets.QHBoxLayout()
+        prov_lbl = QtWidgets.QLabel("PROVIDER / REVIEWER DATABASE:")
+        prov_lbl.setStyleSheet("font-size: 10px; font-weight: 800; color: #71717a; letter-spacing: 0.8px;")
+        prov_head.addWidget(prov_lbl)
+        prov_head.addStretch()
+
+        self.btn_global_search = QtWidgets.QPushButton("Search All (43k+)")
+        self.btn_global_search.setStyleSheet("font-size: 11px; padding: 2px 8px; font-weight: normal;")
+        self.btn_global_search.setToolTip("Search across 43,000+ measurements from 148 reviewers to find your model")
+        self.btn_global_search.clicked.connect(self._open_global_search)
+        prov_head.addWidget(self.btn_global_search)
+        sec_prov.addLayout(prov_head)
+
+        self.provider_combo = SearchableDatabaseInput(self)
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        sec_prov.addWidget(self.provider_combo)
+
+        rig_box = QtWidgets.QHBoxLayout()
+        rig_box.setSpacing(6)
+        self.rig_badge = QtWidgets.QLabel("Rig: IEC 60318-4 (711) [Coupler Isolated]")
+        self.rig_badge.setStyleSheet("font-size: 11px; color: #38bdf8; font-weight: 600;")
+        rig_box.addWidget(self.rig_badge)
+        rig_box.addStretch()
+        sec_prov.addLayout(rig_box)
+
+        consistency_note = QtWidgets.QLabel(
+            "Strict Rig Consistency: Measurement and target are locked to this provider's coupler to guarantee alignment."
+        )
+        consistency_note.setStyleSheet("font-size: 10px; color: #71717a;")
+        sec_prov.addWidget(consistency_note)
+        layout.addLayout(sec_prov)
+
+        # Measurement / Model selection
+        sec_meas = QtWidgets.QVBoxLayout()
+        sec_meas.setSpacing(4)
+        meas_lbl = QtWidgets.QLabel("HEADPHONE / IEM MEASUREMENT:")
+        meas_lbl.setStyleSheet("font-size: 10px; font-weight: 800; color: #71717a; letter-spacing: 0.8px;")
+        sec_meas.addWidget(meas_lbl)
+
+        meas_row = QtWidgets.QHBoxLayout()
+        meas_row.setSpacing(6)
+
+        self.model_input = SearchableModelInput(self)
+        self.model_input.sigModelSelected.connect(self._on_model_selected)
+        meas_row.addWidget(self.model_input, stretch=3)
+
+        self.chan_combo = QtWidgets.QComboBox()
+        self.chan_combo.addItem("Avg", "avg")
+        self.chan_combo.addItem("L", "L")
+        self.chan_combo.addItem("R", "R")
+        self.chan_combo.setToolTip("Channel: Average (L+R), Left (L), or Right (R)")
+        self.chan_combo.setFixedWidth(80)
+        meas_row.addWidget(self.chan_combo, stretch=1)
+        sec_meas.addLayout(meas_row)
+        layout.addLayout(sec_meas)
+
+        # Primary Target Curve selection
+        sec_targ = QtWidgets.QVBoxLayout()
+        sec_targ.setSpacing(4)
+        targ_lbl = QtWidgets.QLabel("PRIMARY TARGET CURVE:")
+        targ_lbl.setStyleSheet("font-size: 10px; font-weight: 800; color: #71717a; letter-spacing: 0.8px;")
+        sec_targ.addWidget(targ_lbl)
+
+        self.target_combo = QtWidgets.QComboBox()
+        sec_targ.addWidget(self.target_combo)
+        layout.addLayout(sec_targ)
+
+        # Secondary Target Curve selection (optional)
+        sec_targ2 = QtWidgets.QVBoxLayout()
+        sec_targ2.setSpacing(4)
+        targ2_lbl = QtWidgets.QLabel("SECONDARY TARGET CURVE (OPTIONAL):")
+        targ2_lbl.setStyleSheet("font-size: 10px; font-weight: 800; color: #71717a; letter-spacing: 0.8px;")
+        sec_targ2.addWidget(targ2_lbl)
+
+        self.target2_combo = QtWidgets.QComboBox()
+        self.target2_combo.addItem("(None)", None)
+        sec_targ2.addWidget(self.target2_combo)
+        layout.addLayout(sec_targ2)
+
+        # Status Label
+        self.status_label = QtWidgets.QLabel("Select a provider, model, and target to attach.")
+        self.status_label.setStyleSheet("font-size: 11px; color: #71717a;")
+        layout.addWidget(self.status_label)
+
+        layout.addStretch()
+
+        # Action Buttons row
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_btn)
+
+        has_curves = bool(
+            self.existing_meta and (
+                self.existing_meta.get("model_file") or
+                self.existing_meta.get("target_file") or
+                self.existing_meta.get("is_autoeq")
+            )
+        )
+        self.remove_btn = QtWidgets.QPushButton("Remove Curves")
+        self.remove_btn.setObjectName("dangerBtn")
+        self.remove_btn.setEnabled(has_curves)
+        self.remove_btn.setToolTip("Remove reference curves from this profile")
+        self.remove_btn.clicked.connect(self._on_remove)
+        btn_row.addWidget(self.remove_btn)
+
+        btn_row.addStretch()
+
+        self.apply_btn = QtWidgets.QPushButton("Apply Curves")
+        self.apply_btn.setObjectName("primaryBtn")
+        self.apply_btn.clicked.connect(self._on_apply)
+        btn_row.addWidget(self.apply_btn)
+
+        layout.addLayout(btn_row)
+
+        main_layout.addWidget(content)
+
+    def _populate_providers(self) -> None:
+        self.provider_combo.blockSignals(True)
+        self.provider_combo.clear()
+
+        favs = self.preset_manager.get_favorite_databases() if self.preset_manager else []
+        db_list = list(DEFAULT_DATABASES)
+        seen_urls = {d.get("base_url", "").rstrip("/") for d in db_list}
+
+        cat = self.client.get_global_catalog()
+        for c in cat:
+            b_url = c.get("base_url", "").rstrip("/")
+            if b_url and b_url not in seen_urls:
+                seen_urls.add(b_url)
+                cat_type = c.get("db_type", "IEMs")
+                p_name = c.get("provider", "Reviewer")
+                disp = f"{p_name} ({cat_type})" if f"({cat_type.lower()}" not in p_name.lower() else p_name
+                db_list.append({
+                    "id": f"{c.get('username') or p_name.lower().replace(' ', '_')}_{cat_type.lower()}",
+                    "name": disp,
+                    "base_url": c.get("base_url", ""),
+                    "rig": c.get("rig", "IEC 711"),
+                    "category": cat_type,
+                })
+
+        sorted_dbs = sorted(
+            db_list,
+            key=lambda d: (0 if d.get("id") in favs else 1, d.get("name", "").lower()),
+        )
+
+        existing_db_id = self.existing_meta.get("database_id", "")
+        existing_url = self.existing_meta.get("base_url", "").rstrip("/")
+        selected_idx = 0
+
+        for i, db in enumerate(sorted_dbs):
+            name = db.get("name", "")
+            if db.get("id") in favs:
+                name = f"★ {name}"
+            self.provider_combo.addItem(name, db)
+            if existing_db_id and db.get("id") == existing_db_id:
+                selected_idx = i
+            elif existing_url and db.get("base_url", "").rstrip("/") == existing_url:
+                selected_idx = i
+
+        self.provider_combo.setCurrentIndex(selected_idx)
+        self.provider_combo.blockSignals(False)
+
+        # Restore channel
+        for i in range(self.chan_combo.count()):
+            if self.chan_combo.itemData(i) == self._selected_chan:
+                self.chan_combo.setCurrentIndex(i)
+                break
+
+        # Trigger initial provider load
+        self._on_provider_changed(selected_idx)
+
+    def _on_provider_changed(self, idx: int = -1) -> None:
+        db_data = self.provider_combo.currentData()
+        if not db_data:
+            return
+        base_url = db_data.get("base_url", "")
+        rig = db_data.get("rig", "IEC 60318-4 (711)")
+        self.rig_badge.setText(f"Rig: {rig} [Coupler Isolated]")
+        self.rig_badge.setToolTip(
+            f"Strict Rig Consistency: Measurement and target are strictly locked to {db_data.get('name', 'this provider')} ({rig})."
+        )
+
+        self.model_input.setEnabled(False)
+        self.target_combo.setEnabled(False)
+        self.status_label.setText(f"Loading {db_data.get('name', '')} catalog...")
+        self.status_label.setStyleSheet("color: #71717a; font-size: 11px;")
+
+        if self._db_worker and self._db_worker.isRunning():
+            self._db_worker.quit()
+            self._db_worker.wait(300)
+
+        self._db_worker = DatabaseIndexWorker(self.client, base_url, parent=self)
+        self._db_worker.sigIndexLoaded.connect(self._on_db_index_loaded)
+        self._db_worker.sigIndexFailed.connect(self._on_db_index_failed)
+        self._db_worker.start()
+
+    def _on_db_index_loaded(self, models: List[SquigModel], targets: List[SquigTarget], rig: str) -> None:
+        self.model_input.setEnabled(True)
+        self.target_combo.setEnabled(True)
+        self._current_models = models
+        self._current_targets = targets
+        self.model_input.set_models(models)
+
+        if rig:
+            self.rig_badge.setText(f"Rig: {rig} [Coupler Isolated]")
+
+        self.target_combo.blockSignals(True)
+        self.target_combo.clear()
+        target_sel_idx = 0
+        for idx, t in enumerate(targets):
+            label = f"[{t.category}] {t.name}" if t.category else t.name
+            self.target_combo.addItem(label, t)
+            if self._pending_target_file:
+                tf_clean = self._pending_target_file.lower().replace(" target", "").strip()
+                t_name_clean = t.name.lower().replace(" target", "").strip()
+                t_file_clean = t.file_name.lower().replace(" target", "").strip()
+                if tf_clean == t_name_clean or tf_clean == t_file_clean:
+                    target_sel_idx = idx
+
+        if targets:
+            self.target_combo.setCurrentIndex(target_sel_idx)
+        self.target_combo.blockSignals(False)
+
+        self.target2_combo.blockSignals(True)
+        self.target2_combo.clear()
+        self.target2_combo.addItem("(None)", None)
+        target2_sel_idx = 0
+        for idx, t in enumerate(targets):
+            label = f"[{t.category}] {t.name}" if t.category else t.name
+            self.target2_combo.addItem(label, t)
+            if self._pending_target2_file:
+                tf_clean = self._pending_target2_file.lower().replace(" target", "").strip()
+                t_name_clean = t.name.lower().replace(" target", "").strip()
+                t_file_clean = t.file_name.lower().replace(" target", "").strip()
+                if tf_clean == t_name_clean or tf_clean == t_file_clean:
+                    target2_sel_idx = idx + 1
+
+        self.target2_combo.setCurrentIndex(target2_sel_idx)
+        self.target2_combo.blockSignals(False)
+
+        if self._pending_model_file:
+            mf_clean = self._pending_model_file.lower().strip()
+            matched = None
+            for m in models:
+                if (m.file_name.lower().strip() == mf_clean or
+                    m.name.lower().strip() == mf_clean or
+                    m.display_name.lower().strip() == mf_clean or
+                    mf_clean in m.display_name.lower()):
+                    matched = m
+                    break
+            if matched:
+                self.model_input.set_selected_model(matched)
+            self._pending_model_file = None
+
+        db_name = self.provider_combo.currentData().get("name", "provider") if self.provider_combo.currentData() else "provider"
+        self.status_label.setText(f"Loaded {len(models)} models and {len(targets)} targets from {db_name}.")
+        self.status_label.setStyleSheet("color: #71717a; font-size: 11px;")
+
+    def _on_db_index_failed(self, err: str) -> None:
+        db_data = self.provider_combo.currentData()
+        base_url = db_data.get("base_url", "").rstrip("/") if db_data else ""
+        cat = self.client.get_global_catalog()
+        fallback_models = []
+        fallback_targets = []
+        for c in cat:
+            if c.get("base_url", "").rstrip("/") == base_url:
+                for p in c.get("phones", []):
+                    fn = p.get("file", "")
+                    if isinstance(fn, list):
+                        fn = fn[0] if fn else ""
+                    fallback_models.append(SquigModel(
+                        brand=p.get("brand", "Unknown"),
+                        name=p.get("name", "Model"),
+                        full_name=p.get("full_name", p.get("name", "Model")),
+                        file_name=fn,
+                        display_name=p.get("full_name", p.get("name", "Model")),
+                    ))
+                for t in c.get("targets", []):
+                    fallback_targets.append(SquigTarget(
+                        name=t,
+                        file_name=f"{t} Target" if not t.lower().endswith("target") else t,
+                        category="Reference",
+                    ))
+                break
+
+        if fallback_models or fallback_targets:
+            self._on_db_index_loaded(fallback_models, fallback_targets, db_data.get("rig", "IEC 711"))
+        else:
+            self.model_input.setEnabled(True)
+            self.target_combo.setEnabled(True)
+            self.status_label.setText(f"Notice: Offline or error loading index: {err}")
+            self.status_label.setStyleSheet("color: #f87171; font-size: 11px;")
+
+    def _on_model_selected(self, model: SquigModel) -> None:
+        if model:
+            self.status_label.setText(f"Selected: {model.display_name}")
+            self.status_label.setStyleSheet("color: #ffffff; font-size: 11px;")
+
+    def _open_global_search(self) -> None:
+        initial_q = self.model_input.text().strip()
+        dlg = GlobalSearchDialog(self.client, initial_query=initial_q, preset_manager=self.preset_manager, parent=self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted and dlg.selected_result:
+            res: GlobalSearchResult = dlg.selected_result
+            res_url = res.base_url.rstrip("/")
+            found_idx = -1
+            for i in range(self.provider_combo.count()):
+                d = self.provider_combo.itemData(i)
+                if isinstance(d, dict) and d.get("base_url", "").rstrip("/") == res_url:
+                    found_idx = i
+                    break
+            if found_idx == -1:
+                new_info = {
+                    "id": res.provider_name.lower().replace(" ", "_"),
+                    "name": res.provider_name,
+                    "base_url": res.base_url,
+                    "rig": res.rig,
+                    "category": res.db_type,
+                }
+                self.provider_combo.addItem(res.provider_name, new_info)
+                found_idx = self.provider_combo.count() - 1
+
+            self._pending_model_file = res.file_name
+            if res.targets:
+                self._pending_target_file = res.targets[0]
+            if self.provider_combo.currentIndex() == found_idx:
+                self._on_provider_changed(found_idx)
+            else:
+                self.provider_combo.setCurrentIndex(found_idx)
+
+    def _on_apply(self) -> None:
+        model = self.model_input.currentData()
+        if not model and self.model_input.text().strip():
+            q = self.model_input.text().strip().lower()
+            for m in self._current_models:
+                if m.display_name.lower() == q or m.name.lower() == q or m.file_name.lower() == q:
+                    model = m
+                    break
+            if not model:
+                for m in self._current_models:
+                    if q in m.display_name.lower():
+                        model = m
+                        break
+
+        target = self.target_combo.currentData()
+        target2 = self.target2_combo.currentData()
+        provider_data = self.provider_combo.currentData()
+        if not provider_data:
+            QtWidgets.QMessageBox.warning(self, "Missing Provider", "Please select a provider database.")
+            return
+
+        if not model and not target and not target2:
+            QtWidgets.QMessageBox.warning(self, "No Selection", "Please select a measurement model or target curve to attach.")
+            return
+
+        db_id = provider_data.get("id", "")
+        db_name = provider_data.get("name", "")
+        base_url = provider_data.get("base_url", "")
+        rig = provider_data.get("rig", "")
+        chan = self.chan_combo.currentData() or "avg"
+
+        meta = {
+            "is_autoeq": False,
+            "database_id": db_id,
+            "database_name": db_name,
+            "base_url": base_url,
+            "model_name": model.name if model else "",
+            "model_file": model.file_name if model else "",
+            "target_name": target.name if target else "",
+            "target_file": target.file_name if target else (target.name if target else ""),
+            "target2_name": target2.name if target2 else "",
+            "target2_file": target2.file_name if target2 else "",
+            "channel_mode": chan,
+            "rig": rig,
+        }
+
+        self.preset_manager.set_preset_metadata(self.preset_name, meta)
+        self.accept()
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() == QtCore.Qt.Key.Key_Down:
+            if not self.model_input.popup.isVisible() and self.focusWidget() not in (
+                self.provider_combo, self.chan_combo, self.target_combo, getattr(self, "target2_combo", None)
+            ):
+                self.model_input.setFocus()
+                self.model_input._show_suggestions(force_all=False)
+                return
+        super().keyPressEvent(event)
+
+    def _on_remove(self) -> None:
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Remove Curves",
+            f"Are you sure you want to remove target and measurement reference curves from profile '{self.preset_name}'?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if confirm == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.preset_manager.set_preset_metadata(self.preset_name, None)
+            self.accept()
+
+
 class AutoResizingScrollArea(QtWidgets.QScrollArea):
     """ScrollArea that synchronizes its widget's width to the viewport width to prevent horizontal clipping."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        make_smooth_scroll(self)
+
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         if self.widget():
@@ -2407,6 +3941,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize_filter = WindowResizeFilter(self)
         self.installEventFilter(self.resize_filter)
 
+        self._global_scroll_filter = AppGlobalScrollFilter(self)
+        app_inst = QtWidgets.QApplication.instance()
+        if app_inst:
+            app_inst.installEventFilter(self._global_scroll_filter)
+
         # Core Engines
         self.preset_manager = PresetManager(self)
         self.spectrum_worker = AudioSpectrumWorker(parent=self)
@@ -2416,6 +3955,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_eq_bypassed = False
 
         # AutoEQ State Tracking
+        self._autoeq_target_mode: int = 0  # 0 = Target Curve, 1 = IEM Tuning, 2 = Resultant Profile
         self._autoeq_meas_raw: Tuple[List[float], List[float]] = ([], [])
         self._autoeq_target_raw: Tuple[List[float], List[float]] = ([], [])
         self._disp_meas_freqs: Optional[np.ndarray] = None
@@ -2483,6 +4023,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._init_audio_device()
         self._load_initial_preset()
 
+        # Check Equalizer APO presence on startup and prompt bundled installer if missing
+        QtCore.QTimer.singleShot(750, self._check_equalizer_apo_on_launch)
+
         # Start background loopback audio worker
         self.spectrum_worker.start()
 
@@ -2505,6 +4048,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.offline_sync_worker.cancel()
             self.offline_sync_worker.wait(400)
         self.spectrum_worker.stop()
+        self.spectrum_worker.wait(500)
         super().closeEvent(event)
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
@@ -2847,6 +4391,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preset_list_widget.itemClicked.connect(self._on_preset_item_clicked)
         self.preset_list_widget.itemDoubleClicked.connect(self._on_preset_item_double_clicked)
         self.preset_list_widget.itemChanged.connect(self._on_preset_item_renamed)
+        self.preset_list_widget.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.preset_list_widget.customContextMenuRequested.connect(self._show_preset_context_menu)
         layout.addWidget(self.preset_list_widget)
 
         # Action Buttons (Swapped: Rename in top-left, Add in bottom-left)
@@ -2930,7 +4476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         db_row = QtWidgets.QHBoxLayout()
         db_row.setSpacing(4)
 
-        self.autoeq_db_combo = QtWidgets.QComboBox()
+        self.autoeq_db_combo = SearchableDatabaseInput(self)
         self.autoeq_db_combo.currentIndexChanged.connect(self._on_autoeq_db_changed)
         db_row.addWidget(self.autoeq_db_combo, stretch=1)
 
@@ -2978,20 +4524,103 @@ class MainWindow(QtWidgets.QMainWindow):
         model_sec.addLayout(model_row)
         layout.addLayout(model_sec)
 
-        # Target Curve Selection
+        # Target Specification (Target Curve vs IEM Tuning vs Resultant Profile)
         target_sec = QtWidgets.QVBoxLayout()
-        target_sec.setSpacing(2)
-        target_lbl = QtWidgets.QLabel("Target Curve")
+        target_sec.setSpacing(4)
+        target_lbl = QtWidgets.QLabel("Target Response")
         target_lbl.setStyleSheet("font-size: 10px; font-weight: 800; color: #71717a; letter-spacing: 0.8px;")
         target_sec.addWidget(target_lbl)
 
+        # Segmented pill selector styled like top PROFILES / AUTOEQ bar
+        self.autoeq_target_mode_tab_bar = SegmentedPillTabBar(
+            ["TARGET CURVE", "IEM TUNING", "RESULTANT"],
+            self,
+            height=28,
+            font_size=8,
+        )
+        self.autoeq_target_mode_tab_bar.sigTabChanged.connect(self._on_target_mode_changed)
+        target_sec.addWidget(self.autoeq_target_mode_tab_bar)
+
+        # Stacked container for target options
+        self.autoeq_target_stack = QtWidgets.QStackedWidget()
+
+        # Page 0: Target Curve
+        p0_widget = QtWidgets.QWidget()
+        p0_layout = QtWidgets.QVBoxLayout(p0_widget)
+        p0_layout.setContentsMargins(0, 2, 0, 0)
+        p0_layout.setSpacing(2)
         self.autoeq_target_combo = QtWidgets.QComboBox()
         self.autoeq_target_combo.currentIndexChanged.connect(self._on_autoeq_target_changed)
-        target_sec.addWidget(self.autoeq_target_combo)
-
+        p0_layout.addWidget(self.autoeq_target_combo)
         self.autoeq_target_info_label = QtWidgets.QLabel("Aligned: Midband MSE (200 - 2,000 Hz)")
         self.autoeq_target_info_label.setStyleSheet("font-size: 10px; color: #71717a;")
-        target_sec.addWidget(self.autoeq_target_info_label)
+        p0_layout.addWidget(self.autoeq_target_info_label)
+        self.autoeq_target_stack.addWidget(p0_widget)
+
+        # Page 1: IEM Tuning (Match another IEM / Headphone)
+        p1_widget = QtWidgets.QWidget()
+        p1_layout = QtWidgets.QVBoxLayout(p1_widget)
+        p1_layout.setContentsMargins(0, 2, 0, 0)
+        p1_layout.setSpacing(2)
+        p1_row = QtWidgets.QHBoxLayout()
+        p1_row.setSpacing(4)
+        self.autoeq_target_iem_combo = SearchableTargetIEMInput(squig_client=self.squig_client)
+        self.autoeq_target_iem_combo.sigModelSelected.connect(lambda _: self._on_autoeq_target_changed())
+        p1_row.addWidget(self.autoeq_target_iem_combo, stretch=3)
+        self.autoeq_target_iem_chan_combo = QtWidgets.QComboBox()
+        self.autoeq_target_iem_chan_combo.addItem("Avg", "avg")
+        self.autoeq_target_iem_chan_combo.addItem("L", "L")
+        self.autoeq_target_iem_chan_combo.addItem("R", "R")
+        self.autoeq_target_iem_chan_combo.setToolTip("Target Channel: Average (L+R), Left (L), or Right (R)")
+        self.autoeq_target_iem_chan_combo.setFixedWidth(80)
+        self.autoeq_target_iem_chan_combo.setStyleSheet("QComboBox { padding: 4px 20px 4px 8px; }")
+        self.autoeq_target_iem_chan_combo.currentIndexChanged.connect(self._on_autoeq_target_changed)
+        p1_row.addWidget(self.autoeq_target_iem_chan_combo, stretch=1)
+        p1_layout.addLayout(p1_row)
+
+        p1_sub_row = QtWidgets.QHBoxLayout()
+        p1_sub_row.setSpacing(6)
+        self.autoeq_target_same_provider_cb = QtWidgets.QCheckBox("Same provider only")
+        self.autoeq_target_same_provider_cb.setChecked(True)
+        self.autoeq_target_same_provider_cb.setToolTip(
+            "Checked: search within current reviewer coupler rig (recommended for acoustic consistency).\n"
+            "Unchecked: search across 43k+ models with current provider prioritized first."
+        )
+        self.autoeq_target_same_provider_cb.setStyleSheet("""
+            QCheckBox {
+                color: #a1a1aa;
+                font-size: 10px;
+                font-weight: 500;
+            }
+            QCheckBox::indicator {
+                width: 13px;
+                height: 13px;
+            }
+        """)
+        self.autoeq_target_same_provider_cb.toggled.connect(self._on_target_same_provider_toggled)
+        p1_sub_row.addWidget(self.autoeq_target_same_provider_cb)
+
+        self.autoeq_target_iem_badge = QtWidgets.QLabel("Rig: IEC 60318-4 [Matched]")
+        self.autoeq_target_iem_badge.setStyleSheet("font-size: 10px; color: #71717a;")
+        self.autoeq_target_iem_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        p1_sub_row.addWidget(self.autoeq_target_iem_badge, stretch=1)
+        p1_layout.addLayout(p1_sub_row)
+        self.autoeq_target_stack.addWidget(p1_widget)
+
+        # Page 2: Resultant Profile
+        p2_widget = QtWidgets.QWidget()
+        p2_layout = QtWidgets.QVBoxLayout(p2_widget)
+        p2_layout.setContentsMargins(0, 2, 0, 0)
+        p2_layout.setSpacing(2)
+        self.autoeq_target_profile_combo = QtWidgets.QComboBox()
+        self.autoeq_target_profile_combo.currentIndexChanged.connect(self._on_autoeq_target_changed)
+        p2_layout.addWidget(self.autoeq_target_profile_combo)
+        self.autoeq_target_profile_info_label = QtWidgets.QLabel("Resultant acoustic response of selected profile")
+        self.autoeq_target_profile_info_label.setStyleSheet("font-size: 10px; color: #71717a;")
+        p2_layout.addWidget(self.autoeq_target_profile_info_label)
+        self.autoeq_target_stack.addWidget(p2_widget)
+
+        target_sec.addWidget(self.autoeq_target_stack)
         layout.addLayout(target_sec)
 
         # Optimization Settings (Compact 2x2 Grid)
@@ -3017,10 +4646,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autoeq_bands_spin.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         opt_grid.addWidget(self.autoeq_bands_spin, 0, 1)
 
-        self.autoeq_bass_shelf_cb = QtWidgets.QCheckBox("Bass Shelf")
+        self.autoeq_bass_shelf_cb = QtWidgets.QPushButton("Bass Shelf")
+        self.autoeq_bass_shelf_cb.setCheckable(True)
         self.autoeq_bass_shelf_cb.setChecked(True)
-        self.autoeq_bass_shelf_cb.setStyleSheet("font-size: 11px; color: #d4d4d8;")
+        self.autoeq_bass_shelf_cb.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.autoeq_bass_shelf_cb.setToolTip("Allocates Band 1 as Low Shelf filter for sub-bass target correction")
+        self.autoeq_bass_shelf_cb.setFixedHeight(36)
+        self.autoeq_bass_shelf_cb.setStyleSheet("""
+            QPushButton {
+                background-color: #18181b;
+                color: #71717a;
+                border: 1px solid #27272a;
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-height: 26px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #27272a;
+                border-color: #3f3f46;
+                color: #a1a1aa;
+            }
+            QPushButton:checked {
+                background-color: #ffffff;
+                color: #09090b;
+                border: 1px solid #ffffff;
+                font-weight: 600;
+            }
+            QPushButton:checked:hover {
+                background-color: #f4f4f5;
+                color: #000000;
+                border-color: #ffffff;
+            }
+        """)
         opt_grid.addWidget(self.autoeq_bass_shelf_cb, 0, 2, 1, 2)
 
         # Row 1: Max Boost & Treble Limit (Borders line up exactly with row 0)
@@ -3100,7 +4759,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header_row.addSpacing(16)
 
         # Graph curve overlay toggles (left of Flatten)
-        self.undergraph_target_btn = QtWidgets.QPushButton("— Target")
+        self.undergraph_target_btn = QtWidgets.QPushButton("Target")
         self.undergraph_target_btn.setCheckable(True)
         self.undergraph_target_btn.setChecked(False)
         self.undergraph_target_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
@@ -3108,7 +4767,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undergraph_target_btn.toggled.connect(self._on_undergraph_overlay_toggled)
         header_row.addWidget(self.undergraph_target_btn)
 
-        self.undergraph_meas_btn = QtWidgets.QPushButton("┄ Measurement")
+        self.undergraph_meas_btn = QtWidgets.QPushButton("Measurement")
         self.undergraph_meas_btn.setCheckable(True)
         self.undergraph_meas_btn.setChecked(False)
         self.undergraph_meas_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
@@ -3116,13 +4775,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undergraph_meas_btn.toggled.connect(self._on_undergraph_overlay_toggled)
         header_row.addWidget(self.undergraph_meas_btn)
 
-        self.undergraph_resultant_btn = QtWidgets.QPushButton("— Resultant")
+        self.undergraph_resultant_btn = QtWidgets.QPushButton("Resultant")
         self.undergraph_resultant_btn.setCheckable(True)
         self.undergraph_resultant_btn.setChecked(False)
         self.undergraph_resultant_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.undergraph_resultant_btn.setToolTip("Toggle predicted resultant response curve on graph")
         self.undergraph_resultant_btn.toggled.connect(self._on_undergraph_overlay_toggled)
         header_row.addWidget(self.undergraph_resultant_btn)
+
+        self.undergraph_target2_btn = QtWidgets.QPushButton("Target 2")
+        self.undergraph_target2_btn.setCheckable(True)
+        self.undergraph_target2_btn.setChecked(False)
+        self.undergraph_target2_btn.setVisible(False)
+        self.undergraph_target2_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.undergraph_target2_btn.setToolTip("Toggle Secondary Target reference curve overlay on graph")
+        self.undergraph_target2_btn.toggled.connect(self._on_undergraph_overlay_toggled)
+        header_row.addWidget(self.undergraph_target2_btn)
+
+        self.undergraph_add_target_btn = QtWidgets.QPushButton("+")
+        self.undergraph_add_target_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.undergraph_add_target_btn.setToolTip("Add or change secondary target curve from same provider")
+        self.undergraph_add_target_btn.setFixedSize(22, 22)
+        self.undergraph_add_target_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #121215;
+                border: 1px solid #27272a;
+                border-radius: 4px;
+                color: #a1a1aa;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #1c1c20;
+                border-color: #3f3f46;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #27272a;
+            }
+        """)
+        self.undergraph_add_target_btn.clicked.connect(self._on_add_target_clicked)
+        header_row.addWidget(self.undergraph_add_target_btn)
 
         self._style_undergraph_toggle_buttons()
 
@@ -3154,26 +4848,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout.addLayout(header_row)
 
-        # Table Widget (Column 6 is explicitly "Delete")
+        # Table Widget (Column 5 is explicitly "Delete")
         self.filter_table = QtWidgets.QTableWidget()
-        self.filter_table.setColumnCount(7)
+        self.filter_table.setColumnCount(6)
         self.filter_table.setHorizontalHeaderLabels([
-            "Band", "Active", "Filter Type", "Frequency (Hz)", "Gain (dB)", "Q Factor", "Delete"
+            "Band", "Filter Type", "Frequency (Hz)", "Gain (dB)", "Q Factor", "Delete"
         ])
-        for col_idx in range(7):
+        for col_idx in range(6):
             item = self.filter_table.horizontalHeaderItem(col_idx)
             if item:
-                if col_idx in (0, 1, 6):
+                if col_idx in (0, 5):
                     item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 else:
                     item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft)
         self.filter_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.filter_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.filter_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.filter_table.horizontalHeader().setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.filter_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.filter_table.verticalHeader().setVisible(False)
         self.filter_table.verticalHeader().setDefaultSectionSize(32)
         self.filter_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        make_smooth_scroll(self.filter_table)
 
         layout.addWidget(self.filter_table)
         return frame
@@ -3202,8 +4896,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Could not launch Equalizer APO Device Selector / Configurator:\n{msg}\n\nPlease verify Equalizer APO is installed.",
             )
 
+    def _check_equalizer_apo_on_launch(self) -> None:
+        if self.preset_manager.get_setting("ignore_missing_apo", False):
+            return
+        if not is_equalizer_apo_installed():
+            self._prompt_install_equalizer_apo()
+
+    def _prompt_install_equalizer_apo(self) -> None:
+        dlg = EqualizerApoInstallDialog(self)
+        dlg.sigInstalled.connect(self._on_apo_installed_success)
+        dlg.exec()
+        if dlg.chk_dont_ask.isChecked():
+            self.preset_manager.set_setting("ignore_missing_apo", True)
+
+    def _on_apo_installed_success(self) -> None:
+        self.preset_manager.apo_target_path = DEFAULT_APO_PATH
+        self.preset_manager.active_apo_path = DEFAULT_APO_PATH
+        ensure_apo_root_config_include(DEFAULT_APO_PATH)
+        self.preset_manager.save_settings()
+        self.preset_manager.save_active_preset_to_apo()
+        if hasattr(self, "status_bar_label"):
+            self.status_bar_label.setText("Equalizer APO Connected (clean_apo_generated.txt)")
+
     def _check_device_apo_status(self, dev_name: str) -> None:
         if not dev_name or "auto-follow" in dev_name.lower():
+            return
+        if not is_equalizer_apo_installed():
+            self._prompt_install_equalizer_apo()
             return
         cfg = get_apo_configurator_path()
         if not cfg:
@@ -3420,12 +5139,21 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(name)
             item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsEditable)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, name)
+            meta = self.preset_manager.get_preset_metadata(name)
+            if meta and (meta.get("model_name") or meta.get("target_name") or meta.get("is_autoeq")):
+                m_info = meta.get("model_name") or "Measurement"
+                t_info = meta.get("target_name") or "Target"
+                db_info = meta.get("database_name") or meta.get("database_id") or "Reviewer"
+                item.setToolTip(f"{name}\nReference: {m_info}\nTarget: {t_info} ({db_info})")
+            else:
+                item.setToolTip(f"{name}\nNo reference curves attached")
             self.preset_list_widget.addItem(item)
             if name == active:
                 self.preset_list_widget.setCurrentItem(item)
 
         self.preset_list_widget.blockSignals(False)
         self.preset_list_widget.animate_to_current()
+        self._update_curves_button_state()
 
     def _filter_presets_list(self, text: str) -> None:
         text = text.lower().strip()
@@ -3488,6 +5216,65 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         finally:
             self._is_renaming_preset = False
+
+    def _show_preset_context_menu(self, pos: QtCore.QPoint) -> None:
+        item = self.preset_list_widget.itemAt(pos)
+        if not item:
+            return
+        name = item.text()
+        has_curves = self.preset_manager.has_preset_metadata(name)
+        menu = QtWidgets.QMenu(self)
+
+        act_curves = menu.addAction("Edit Target & Measurement..." if has_curves else "+ Add Target & Measurement...")
+        act_curves.triggered.connect(lambda: self._open_assign_curves_dialog(name))
+
+        if has_curves:
+            act_remove = menu.addAction("Remove Target & Measurement")
+            act_remove.triggered.connect(lambda: self._remove_preset_curves(name))
+
+        menu.addSeparator()
+
+        act_ren = menu.addAction("Rename (F2)")
+        act_ren.triggered.connect(self._rename_preset_inline)
+
+        act_dup = menu.addAction("Duplicate")
+        act_dup.triggered.connect(self._duplicate_preset)
+
+        act_del = menu.addAction("Delete")
+        act_del.triggered.connect(self._delete_preset)
+
+        menu.exec(self.preset_list_widget.mapToGlobal(pos))
+
+    def _open_assign_curves_dialog(self, preset_name: Optional[str] = None) -> None:
+        target_preset = preset_name or self.preset_manager.active_preset_name
+        dlg = ProfileCurveAssignmentDialog(
+            client=self.squig_client,
+            preset_manager=self.preset_manager,
+            preset_name=target_preset,
+            parent=self,
+        )
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            if target_preset == self.preset_manager.active_preset_name:
+                self._on_preset_loaded(target_preset, animate=False)
+            self._refresh_presets_list()
+            self._update_curves_button_state()
+
+    def _remove_preset_curves(self, preset_name: str) -> None:
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Remove Curves",
+            f"Are you sure you want to remove target and measurement reference curves from '{preset_name}'?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if confirm == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.preset_manager.set_preset_metadata(preset_name, None)
+            if preset_name == self.preset_manager.active_preset_name:
+                self._clear_autoeq_overlays()
+            self._refresh_presets_list()
+            self._update_curves_button_state()
+
+    def _update_curves_button_state(self) -> None:
+        pass
 
     def _compute_normalized_display_curves(
         self,
@@ -3560,25 +5347,85 @@ class MainWindow(QtWidgets.QMainWindow):
 
         preamp, bands = self.preset_manager.get_active_preset_data()
 
-        # Check if preset was generated with AutoEQ metadata
+        # Check if preset was generated with AutoEQ metadata or has reference curves attached
         autoeq_meta = self.preset_manager.get_preset_metadata(preset_name)
         new_meas_data: Tuple[Optional[Sequence[float]], Optional[Sequence[float]], str] = (None, None, "")
         new_target_data: Tuple[Optional[Sequence[float]], Optional[Sequence[float]], str] = (None, None, "")
         new_res_data: Tuple[Optional[Sequence[float]], Optional[Sequence[float]], str] = (None, None, "")
 
-        if autoeq_meta and autoeq_meta.get("is_autoeq"):
+        has_curves = bool(
+            autoeq_meta and (
+                autoeq_meta.get("is_autoeq") or
+                autoeq_meta.get("model_file") or
+                autoeq_meta.get("target_file") or
+                autoeq_meta.get("target_iem_file") or
+                autoeq_meta.get("target_profile_name")
+            )
+        )
+
+        if has_curves:
             db_id = autoeq_meta.get("database_id", "")
             m_file = autoeq_meta.get("model_file", "")
             t_file = autoeq_meta.get("target_file", "")
             t_name = autoeq_meta.get("target_name", "")
             chan = autoeq_meta.get("channel_mode", "avg")
             m_name = autoeq_meta.get("model_name", "")
+            t_mode = autoeq_meta.get("target_mode", "target_curve")
 
             # Query offline database synchronously (ultra-fast SQLite lookup)
             from offline_db import get_offline_db
             off_db = get_offline_db()
             m_res = off_db.get_measurement(db_id, m_file, chan) if m_file else None
-            t_res = off_db.get_target(db_id, t_file, t_name) if t_file else None
+            if not m_res and m_file:
+                base_u = autoeq_meta.get("base_url")
+                if base_u:
+                    try:
+                        temp_m = SquigModel(
+                            brand="",
+                            name=m_name or m_file,
+                            full_name=m_name or m_file,
+                            file_name=m_file,
+                            display_name=m_name or m_file,
+                        )
+                        m_res = self.squig_client.fetch_iem_measurement(base_u, temp_m, chan)
+                    except Exception:
+                        m_res = None
+
+            t_res = None
+            if t_mode == "iem_tuning" or autoeq_meta.get("target_iem_file"):
+                t_iem_file = autoeq_meta.get("target_iem_file", "")
+                t_iem_name = autoeq_meta.get("target_iem_name", "")
+                t_iem_chan = autoeq_meta.get("target_iem_channel", "avg")
+                t_iem_base = autoeq_meta.get("target_iem_base_url") or autoeq_meta.get("base_url", "")
+                t_res = off_db.get_measurement(db_id, t_iem_file, t_iem_chan) if t_iem_file else None
+                if not t_res and t_iem_file and t_iem_base:
+                    try:
+                        temp_m = SquigModel(
+                            brand="",
+                            name=t_iem_name or t_iem_file,
+                            full_name=t_iem_name or t_iem_file,
+                            file_name=t_iem_file,
+                            display_name=t_iem_name or t_iem_file,
+                        )
+                        t_res = self.squig_client.fetch_iem_measurement(t_iem_base, temp_m, t_iem_chan)
+                    except Exception:
+                        t_res = None
+                t_name = f"{t_iem_name or t_iem_file} (Target)"
+            elif t_mode == "resultant_profile" or autoeq_meta.get("target_profile_name"):
+                target_p_name = autoeq_meta.get("target_profile_name", "")
+                t_res = self._compute_preset_resultant_curve(target_p_name)
+                t_name = f"{target_p_name} (Resultant)"
+            else:
+                t_res = off_db.get_target(db_id, t_file, t_name) if t_file else None
+                if not t_res and t_file:
+                    base_u = autoeq_meta.get("base_url")
+                    if base_u:
+                        try:
+                            t_res = self.squig_client.fetch_target_curve(
+                                base_u, SquigTarget(name=t_name or t_file, file_name=t_file)
+                            )
+                        except Exception:
+                            t_res = None
 
             if m_res or t_res:
                 mf, ms = m_res if m_res else ([], [])
@@ -3602,6 +5449,39 @@ class MainWindow(QtWidgets.QMainWindow):
                 if dr[0]:
                     new_res_data = (dr[0], dr[1], f"{m_name or 'Resultant'} + EQ")
 
+                # Handle secondary target curve (target 2)
+                t2_file = autoeq_meta.get("target2_file", "")
+                t2_name = autoeq_meta.get("target2_name", "")
+                t2_res = off_db.get_target(db_id, t2_file, t2_name) if t2_file else None
+                if not t2_res and t2_file:
+                    base_u = autoeq_meta.get("base_url")
+                    if base_u:
+                        try:
+                            t2_res = self.squig_client.fetch_target_curve(
+                                base_u, SquigTarget(name=t2_name or t2_file, file_name=t2_file)
+                            )
+                        except Exception:
+                            t2_res = None
+
+                if t2_res and len(t2_res[0]) > 0 and len(t2_res[1]) > 0:
+                    t2_f, t2_s = t2_res
+                    t2_f_arr = np.asarray(t2_f, dtype=np.float64)
+                    t2_s_arr = np.asarray(t2_s, dtype=np.float64)
+                    mid_mask2 = (t2_f_arr >= 200.0) & (t2_f_arr <= 2000.0)
+                    target2_norm = float(np.mean(t2_s_arr[mid_mask2])) if np.any(mid_mask2) else float(np.mean(t2_s_arr))
+                    disp_target2 = t2_s_arr - target2_norm
+                    self.eq_plot.set_target2_overlay(t2_f_arr.tolist(), disp_target2.tolist(), label=t2_name or "Target 2")
+                    self.undergraph_target2_btn.setVisible(True)
+                    self.undergraph_target2_btn.blockSignals(True)
+                    self.undergraph_target2_btn.setChecked(True)
+                    self.undergraph_target2_btn.blockSignals(False)
+                else:
+                    self.eq_plot.set_target2_overlay(None, None)
+                    self.undergraph_target2_btn.blockSignals(True)
+                    self.undergraph_target2_btn.setChecked(False)
+                    self.undergraph_target2_btn.setVisible(False)
+                    self.undergraph_target2_btn.blockSignals(False)
+
                 self.undergraph_meas_btn.blockSignals(True)
                 self.undergraph_target_btn.blockSignals(True)
                 self.undergraph_resultant_btn.blockSignals(True)
@@ -3611,8 +5491,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.undergraph_meas_btn.blockSignals(False)
                 self.undergraph_target_btn.blockSignals(False)
                 self.undergraph_resultant_btn.blockSignals(False)
+                self.eq_plot._is_meas_checked = bool(dm[0])
+                self.eq_plot._is_target_checked = bool(dt[0])
+                self.eq_plot._is_resultant_checked = bool(dr[0])
                 if not animate:
-                    self.eq_plot.set_overlays_visible(bool(dm[0]), bool(dt[0]), bool(dr[0]))
+                    self.eq_plot.set_overlays_visible(
+                        bool(dm[0]), bool(dt[0]), bool(dr[0]),
+                        show_target2=self.undergraph_target2_btn.isChecked(),
+                    )
                 self._style_undergraph_toggle_buttons()
 
                 self._restore_autoeq_preset_ui(autoeq_meta, skip_curve_fetch=True)
@@ -3621,6 +5507,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._autoeq_target_raw = ([], [])
                 self._disp_meas_freqs = None
                 self._disp_meas_spls = None
+                self.eq_plot.set_target2_overlay(None, None)
+                self.undergraph_target2_btn.blockSignals(True)
+                self.undergraph_target2_btn.setChecked(False)
+                self.undergraph_target2_btn.setVisible(False)
+                self.undergraph_target2_btn.blockSignals(False)
                 self.undergraph_meas_btn.blockSignals(True)
                 self.undergraph_target_btn.blockSignals(True)
                 self.undergraph_resultant_btn.blockSignals(True)
@@ -3631,7 +5522,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.undergraph_target_btn.blockSignals(False)
                 self.undergraph_resultant_btn.blockSignals(False)
                 if not animate:
-                    self.eq_plot.set_overlays_visible(True, True, True)
+                    self.eq_plot.set_overlays_visible(True, True, True, show_target2=False)
                 self._style_undergraph_toggle_buttons()
                 self._restore_autoeq_preset_ui(autoeq_meta, skip_curve_fetch=False)
         else:
@@ -3639,6 +5530,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._autoeq_target_raw = ([], [])
             self._disp_meas_freqs = None
             self._disp_meas_spls = None
+            self.eq_plot.set_target2_overlay(None, None)
+            self.undergraph_target2_btn.blockSignals(True)
+            self.undergraph_target2_btn.setChecked(False)
+            self.undergraph_target2_btn.setVisible(False)
+            self.undergraph_target2_btn.blockSignals(False)
             self.undergraph_meas_btn.blockSignals(True)
             self.undergraph_target_btn.blockSignals(True)
             self.undergraph_resultant_btn.blockSignals(True)
@@ -3649,7 +5545,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.undergraph_target_btn.blockSignals(False)
             self.undergraph_resultant_btn.blockSignals(False)
             if not animate:
-                self.eq_plot.set_overlays_visible(False, False, False)
+                self.eq_plot.set_overlays_visible(False, False, False, show_target2=False)
             self._style_undergraph_toggle_buttons()
 
         # Preamp smooth cubic animation
@@ -3679,6 +5575,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.undergraph_meas_btn.isChecked(),
                 self.undergraph_target_btn.isChecked(),
                 self.undergraph_resultant_btn.isChecked(),
+                show_target2=self.undergraph_target2_btn.isChecked(),
             )
 
         self._populate_table(bands)
@@ -3686,6 +5583,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_state = self._get_current_state()
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._update_curves_button_state()
 
     def _restore_autoeq_preset_ui(self, meta: Dict[str, Any], skip_curve_fetch: bool = False) -> None:
         db_id = meta.get("database_id")
@@ -3707,14 +5605,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.autoeq_chan_combo.blockSignals(False)
                 break
 
+        found_db = False
         for i in range(self.autoeq_db_combo.count()):
             d = self.autoeq_db_combo.itemData(i)
-            if isinstance(d, dict) and (d.get("id") == db_id or (base_url and d.get("base_url") == base_url)):
+            if isinstance(d, dict) and (d.get("id") == db_id or (base_url and d.get("base_url", "").rstrip("/") == (base_url or "").rstrip("/"))):
+                found_db = True
                 if self.autoeq_db_combo.currentIndex() == i:
                     self._apply_pending_autoeq_restore()
                 else:
                     self.autoeq_db_combo.setCurrentIndex(i)
                 break
+
+        if not found_db and base_url:
+            db_name = meta.get("database_name") or db_id or "Reviewer DB"
+            new_db_info = {
+                "id": db_id or "custom",
+                "name": db_name,
+                "base_url": base_url,
+                "rig": meta.get("rig", "IEC 711"),
+            }
+            ins_idx = max(0, self.autoeq_db_combo.count() - 1)
+            self.autoeq_db_combo.blockSignals(True)
+            self.autoeq_db_combo.insertItem(ins_idx, db_name, new_db_info)
+            self.autoeq_db_combo.blockSignals(False)
+            self.autoeq_db_combo.setCurrentIndex(ins_idx)
 
     def _apply_pending_autoeq_restore(self) -> None:
         skip = getattr(self, "_pending_restore_skip_fetch", False)
@@ -3913,43 +5827,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.band_count_label.setText(f"BANDS ({len(bands)})")
 
         for row, band in enumerate(bands):
-            # 0. Band Badge
-            badge = QtWidgets.QLabel(f" {band.band_id} ")
-            badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            badge.setStyleSheet(
-                "background-color: #ffffff; color: #000000; font-weight: bold; "
-                "border-radius: 9px; min-width: 18px; max-width: 22px; min-height: 18px;"
-            )
+            # 0. Band Badge Button (toggles bypass on click, mirrors plot handle)
+            badge_btn = BandBadgeButton(band.band_id, band.enabled)
+            badge_btn.toggled.connect(self._on_table_active_toggled)
             badge_container = QtWidgets.QWidget()
             b_layout = QtWidgets.QHBoxLayout(badge_container)
             b_layout.setContentsMargins(4, 2, 4, 2)
             b_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            b_layout.addWidget(badge)
+            b_layout.addWidget(badge_btn)
             self.filter_table.setCellWidget(row, 0, badge_container)
 
-            # 1. Active Checkbox (Centered & Fixed Dimensions)
-            active_cb = QtWidgets.QCheckBox()
-            active_cb.setChecked(band.enabled)
-            active_cb.setProperty("band_id", band.band_id)
-            active_cb.setFixedSize(16, 16)
-            active_cb.toggled.connect(self._on_table_active_toggled)
-            cb_container = QtWidgets.QWidget()
-            cb_layout = QtWidgets.QHBoxLayout(cb_container)
-            cb_layout.setContentsMargins(0, 0, 0, 0)
-            cb_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            cb_layout.addWidget(active_cb)
-            self.filter_table.setCellWidget(row, 1, cb_container)
-
-            # 2. Type ComboBox (NoScrollComboBox ignores wheel to prevent accidental filter type switching)
+            # 1. Type ComboBox (NoScrollComboBox ignores wheel to prevent accidental filter type switching)
             type_combo = NoScrollComboBox()
             for ft in [FilterType.PEAK, FilterType.LOW_SHELF, FilterType.HIGH_SHELF, FilterType.HIGH_PASS, FilterType.LOW_PASS]:
                 type_combo.addItem(ft.value)
             type_combo.setCurrentText(band.filter_type)
             type_combo.setProperty("band_id", band.band_id)
             type_combo.currentTextChanged.connect(self._on_table_type_changed)
-            self.filter_table.setCellWidget(row, 2, type_combo)
+            self.filter_table.setCellWidget(row, 1, type_combo)
 
-            # 3. Frequency SpinBox (CleanSpinBox: highlights numeric value only)
+            # 2. Frequency SpinBox (CleanSpinBox: highlights numeric value only)
             freq_spin = CleanSpinBox()
             freq_spin.setRange(20.0, 20000.0)
             freq_spin.setDecimals(1)
@@ -3958,9 +5855,9 @@ class MainWindow(QtWidgets.QMainWindow):
             freq_spin.setValue(band.freq)
             freq_spin.setProperty("band_id", band.band_id)
             freq_spin.valueChanged.connect(self._on_table_freq_changed)
-            self.filter_table.setCellWidget(row, 3, freq_spin)
+            self.filter_table.setCellWidget(row, 2, freq_spin)
 
-            # 4. Gain SpinBox (CleanSpinBox: highlights numeric value only)
+            # 3. Gain SpinBox (CleanSpinBox: highlights numeric value only)
             gain_spin = CleanSpinBox()
             gain_spin.setRange(-20.0, 20.0)
             gain_spin.setDecimals(1)
@@ -3971,9 +5868,9 @@ class MainWindow(QtWidgets.QMainWindow):
             gain_spin.setEnabled(ftype not in (FilterType.HIGH_PASS, FilterType.LOW_PASS))
             gain_spin.setProperty("band_id", band.band_id)
             gain_spin.valueChanged.connect(self._on_table_gain_changed)
-            self.filter_table.setCellWidget(row, 4, gain_spin)
+            self.filter_table.setCellWidget(row, 3, gain_spin)
 
-            # 5. Q Factor SpinBox
+            # 4. Q Factor SpinBox
             q_spin = CleanSpinBox()
             q_spin.setRange(0.1, 20.0)
             q_spin.setDecimals(2)
@@ -3981,9 +5878,9 @@ class MainWindow(QtWidgets.QMainWindow):
             q_spin.setValue(band.q)
             q_spin.setProperty("band_id", band.band_id)
             q_spin.valueChanged.connect(self._on_table_q_changed)
-            self.filter_table.setCellWidget(row, 5, q_spin)
+            self.filter_table.setCellWidget(row, 4, q_spin)
 
-            # 6. Delete Button ("X" turns red on hover)
+            # 5. Delete Button ("X" turns red on hover)
             del_btn = QtWidgets.QPushButton("✕")
             del_btn.setProperty("class", "tableDeleteBtn")
             del_btn.setProperty("band_id", band.band_id)
@@ -3995,7 +5892,7 @@ class MainWindow(QtWidgets.QMainWindow):
             del_layout.setContentsMargins(0, 0, 0, 0)
             del_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             del_layout.addWidget(del_btn)
-            self.filter_table.setCellWidget(row, 6, del_container)
+            self.filter_table.setCellWidget(row, 5, del_container)
 
         self._updating_table = False
 
@@ -4005,27 +5902,25 @@ class MainWindow(QtWidgets.QMainWindow):
             badge_widget = self.filter_table.cellWidget(row, 0)
             if not badge_widget:
                 continue
-            badge_lbl = badge_widget.findChild(QtWidgets.QLabel)
-            if badge_lbl and badge_lbl.text().strip() == str(band_id):
-                cb = self.filter_table.cellWidget(row, 1).findChild(QtWidgets.QCheckBox)
-                if cb:
-                    cb.blockSignals(True)
-                    cb.setChecked(enabled)
-                    cb.blockSignals(False)
+            badge_btn = badge_widget.findChild(BandBadgeButton)
+            if badge_btn and badge_btn.band_id == band_id:
+                badge_btn.blockSignals(True)
+                badge_btn.setChecked(enabled)
+                badge_btn.blockSignals(False)
 
-                type_combo = self.filter_table.cellWidget(row, 2)
+                type_combo = self.filter_table.cellWidget(row, 1)
                 if isinstance(type_combo, QtWidgets.QComboBox):
                     type_combo.blockSignals(True)
                     type_combo.setCurrentText(filter_type)
                     type_combo.blockSignals(False)
 
-                freq_spin = self.filter_table.cellWidget(row, 3)
+                freq_spin = self.filter_table.cellWidget(row, 2)
                 if isinstance(freq_spin, QtWidgets.QDoubleSpinBox):
                     freq_spin.blockSignals(True)
                     freq_spin.setValue(freq)
                     freq_spin.blockSignals(False)
 
-                gain_spin = self.filter_table.cellWidget(row, 4)
+                gain_spin = self.filter_table.cellWidget(row, 3)
                 if isinstance(gain_spin, QtWidgets.QDoubleSpinBox):
                     gain_spin.blockSignals(True)
                     gain_spin.setValue(gain)
@@ -4033,7 +5928,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     gain_spin.setEnabled(ftype not in (FilterType.HIGH_PASS, FilterType.LOW_PASS))
                     gain_spin.blockSignals(False)
 
-                q_spin = self.filter_table.cellWidget(row, 5)
+                q_spin = self.filter_table.cellWidget(row, 4)
                 if isinstance(q_spin, QtWidgets.QDoubleSpinBox):
                     q_spin.blockSignals(True)
                     q_spin.setValue(q)
@@ -4251,7 +6146,165 @@ class MainWindow(QtWidgets.QMainWindow):
         initial_q = self.autoeq_model_combo.currentText().strip()
         dlg = GlobalSearchDialog(self.squig_client, initial_query=initial_q, preset_manager=self.preset_manager, parent=self)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted and dlg.selected_result:
-            self._on_global_search_applied(dlg.selected_result)
+            if getattr(dlg, "load_role", "source") == "target":
+                self._on_global_search_applied_as_target(dlg.selected_result)
+            else:
+                self._on_global_search_applied(dlg.selected_result)
+
+    def _on_global_search_applied_as_target(self, res: GlobalSearchResult) -> None:
+        self._switch_sidebar_tab(1)
+        self.autoeq_target_mode_tab_bar.set_current_index(1)
+        self._on_target_mode_changed(1)
+
+        is_same = bool(
+            self._active_db_info.get("base_url") and
+            res.base_url.rstrip("/").lower() == self._active_db_info.get("base_url", "").rstrip("/").lower()
+        )
+        self.autoeq_target_same_provider_cb.blockSignals(True)
+        self.autoeq_target_same_provider_cb.setChecked(is_same)
+        self.autoeq_target_same_provider_cb.blockSignals(False)
+
+        disp = res.full_name or f"{res.brand} {res.name}".strip() or res.name
+        target_m = SquigModel(
+            brand=res.brand,
+            name=res.name,
+            full_name=res.full_name,
+            file_name=res.file_name,
+            display_name=disp,
+        )
+        target_m.base_url = res.base_url
+        target_m.provider_name = res.provider_name
+        target_m.rig = res.rig
+
+        self.autoeq_target_iem_combo.set_selected_model(target_m)
+        self.autoeq_target_iem_badge.setText(f"Rig: {res.rig} [{'Matched' if is_same else 'External'}]")
+        self._fetch_selected_curves()
+
+    def _on_target_mode_changed(self, idx: int) -> None:
+        self._autoeq_target_mode = idx
+        self.autoeq_target_stack.setCurrentIndex(idx)
+        if idx == 2:
+            self._populate_target_profiles()
+        self._fetch_selected_curves()
+
+    def _on_target_same_provider_toggled(self, checked: bool) -> None:
+        if hasattr(self, "autoeq_target_iem_combo"):
+            self.autoeq_target_iem_combo.set_same_provider_only(checked)
+            self._fetch_selected_curves()
+
+    def _populate_target_profiles(self) -> None:
+        if not hasattr(self, "autoeq_target_profile_combo"):
+            return
+        curr = self.autoeq_target_profile_combo.currentData() or self.autoeq_target_profile_combo.currentText().strip()
+        self.autoeq_target_profile_combo.blockSignals(True)
+        self.autoeq_target_profile_combo.clear()
+        presets = self.preset_manager.get_preset_names()
+        sel_idx = 0
+        for i, p in enumerate(presets):
+            meta = self.preset_manager.get_preset_metadata(p)
+            has_autoeq = bool(meta and meta.get("is_autoeq"))
+            tag = " [AutoEQ]" if has_autoeq else ""
+            self.autoeq_target_profile_combo.addItem(f"{p}{tag}", p)
+            if curr and p == curr:
+                sel_idx = i
+        if presets:
+            self.autoeq_target_profile_combo.setCurrentIndex(sel_idx)
+        self.autoeq_target_profile_combo.blockSignals(False)
+
+    def _compute_preset_resultant_curve(self, preset_name: str) -> Optional[Tuple[List[float], List[float]]]:
+        p_data = self.preset_manager.presets.get(preset_name)
+        if not p_data:
+            return None
+        bands = [EQBand.from_dict(b) for b in p_data.get("bands", [])]
+        meta = p_data.get("autoeq") or {}
+        db_id = meta.get("database_id", "")
+        m_file = meta.get("model_file") or meta.get("model_name", "")
+        chan = meta.get("channel_mode", "avg")
+        base_u = meta.get("base_url", "")
+
+        from offline_db import get_offline_db
+        off_db = get_offline_db()
+        m_res = off_db.get_measurement(db_id, m_file, chan) if (db_id and m_file) else None
+        if not m_res and m_file and base_u:
+            try:
+                temp_m = SquigModel(name=m_file, file_name=m_file, brand="", full_name=m_file, display_name=m_file)
+                m_res = self.squig_client.fetch_iem_measurement(base_u, temp_m, chan)
+            except Exception:
+                m_res = None
+
+        if m_res and len(m_res[0]) > 0:
+            pmf, pms = m_res
+            eq_resp = compute_composite_response(bands, np.asarray(pmf, dtype=np.float64), preamp_db=0.0, fs=self.sample_rate)
+            res_spls = np.asarray(pms, dtype=np.float64) + eq_resp
+            return (list(pmf), res_spls.tolist())
+        else:
+            f_grid = np.geomspace(20.0, 20000.0, num=300)
+            eq_resp = compute_composite_response(bands, f_grid, preamp_db=0.0, fs=self.sample_rate)
+            return (f_grid.tolist(), eq_resp.tolist())
+
+    def _build_current_autoeq_preset_meta(self) -> Tuple[str, Dict[str, Any]]:
+        model = self.autoeq_model_combo.currentData()
+        chan = self.autoeq_chan_combo.currentData() or "avg"
+        m_name = model.name if model else "IEM"
+        mode = getattr(self, "_autoeq_target_mode", 0)
+
+        if mode == 0:
+            target = self.autoeq_target_combo.currentData()
+            t_name = target.name if target else "Target"
+            preset_name = f"AutoEQ: {m_name} ({t_name})"
+            autoeq_meta = {
+                "is_autoeq": True,
+                "target_mode": "target_curve",
+                "database_id": self._active_db_info.get("id", ""),
+                "database_name": self._active_db_info.get("name", ""),
+                "base_url": self._active_db_info.get("base_url", ""),
+                "model_name": m_name,
+                "model_file": model.file_name if model else "",
+                "target_name": t_name,
+                "target_file": target.file_name if target else (target.name if target else ""),
+                "channel_mode": chan,
+            }
+        elif mode == 1:
+            target_iem = self.autoeq_target_iem_combo.currentData()
+            t_name = target_iem.name if target_iem else "Target IEM"
+            t_url = getattr(target_iem, "base_url", "") or self._active_db_info.get("base_url", "")
+            t_prov = getattr(target_iem, "provider_name", "") or self._active_db_info.get("name", "")
+            t_rig = getattr(target_iem, "rig", "") or self._active_db_info.get("rig", "")
+            t_chan = self.autoeq_target_iem_chan_combo.currentData() or "avg"
+            preset_name = f"AutoEQ: {m_name} -> {t_name}"
+            autoeq_meta = {
+                "is_autoeq": True,
+                "target_mode": "iem_tuning",
+                "database_id": self._active_db_info.get("id", ""),
+                "database_name": self._active_db_info.get("name", ""),
+                "base_url": self._active_db_info.get("base_url", ""),
+                "model_name": m_name,
+                "model_file": model.file_name if model else "",
+                "channel_mode": chan,
+                "target_name": f"{t_name} (Tuning)",
+                "target_iem_name": t_name,
+                "target_iem_file": target_iem.file_name if target_iem else "",
+                "target_iem_channel": t_chan,
+                "target_iem_base_url": t_url,
+                "target_iem_provider": t_prov,
+                "target_iem_rig": t_rig,
+            }
+        else:  # mode == 2
+            target_prof = self.autoeq_target_profile_combo.currentData() or self.autoeq_target_profile_combo.currentText().strip()
+            preset_name = f"AutoEQ: {m_name} -> {target_prof}"
+            autoeq_meta = {
+                "is_autoeq": True,
+                "target_mode": "resultant_profile",
+                "database_id": self._active_db_info.get("id", ""),
+                "database_name": self._active_db_info.get("name", ""),
+                "base_url": self._active_db_info.get("base_url", ""),
+                "model_name": m_name,
+                "model_file": model.file_name if model else "",
+                "channel_mode": chan,
+                "target_name": f"{target_prof} (Resultant)",
+                "target_profile_name": target_prof,
+            }
+        return preset_name, autoeq_meta
 
     def _open_offline_sync(self) -> None:
         dlg = OfflineSyncDialog(self.squig_client, parent=self)
@@ -4367,9 +6420,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autoeq_db_combo.blockSignals(True)
         self.autoeq_db_combo.clear()
 
-        favs = self.preset_manager.get_favorite_databases()
+        favs = self.preset_manager.get_favorite_databases() if self.preset_manager else []
+        db_list = list(DEFAULT_DATABASES)
+        seen_urls = {d.get("base_url", "").rstrip("/") for d in db_list}
+
+        if hasattr(self, "squig_client") and self.squig_client:
+            cat = self.squig_client.get_global_catalog()
+            for c in cat:
+                b_url = c.get("base_url", "").rstrip("/")
+                if b_url and b_url not in seen_urls:
+                    seen_urls.add(b_url)
+                    cat_type = c.get("db_type", "IEMs")
+                    p_name = c.get("provider", "Reviewer")
+                    disp = f"{p_name} ({cat_type})" if f"({cat_type.lower()}" not in p_name.lower() else p_name
+                    db_list.append({
+                        "id": f"{c.get('username') or p_name.lower().replace(' ', '_')}_{cat_type.lower()}",
+                        "name": disp,
+                        "base_url": c.get("base_url", ""),
+                        "rig": c.get("rig", "IEC 711"),
+                        "category": cat_type,
+                    })
+
         sorted_dbs = sorted(
-            DEFAULT_DATABASES,
+            db_list,
             key=lambda d: (0 if d.get("id") in favs else 1, d.get("name", "").lower()),
         )
 
@@ -4460,6 +6533,22 @@ class MainWindow(QtWidgets.QMainWindow):
             }}
         """)
 
+        t2_active = self.undergraph_target2_btn.isChecked()
+        self.undergraph_target2_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {"#1e1428" if t2_active else "#09090b"};
+                color: {"#c084fc" if t2_active else "#52525b"};
+                border: 1px solid {"#7e22ce" if t2_active else "#27272a"};
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 11px;
+                font-weight: {"600" if t2_active else "normal"};
+            }}
+            QPushButton:hover {{
+                border-color: {"#c084fc" if t2_active else "#3f3f46"};
+            }}
+        """)
+
         m_active = self.undergraph_meas_btn.isChecked()
         self.undergraph_meas_btn.setStyleSheet(f"""
             QPushButton {{
@@ -4494,19 +6583,164 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_undergraph_overlay_toggled(self) -> None:
         self._style_undergraph_toggle_buttons()
+        active_preset = self.preset_manager.active_preset_name
+        has_meta = self.preset_manager.has_preset_metadata(active_preset)
+        has_plot_curves = (
+            self.eq_plot._meas_freqs is not None or
+            self.eq_plot._target_freqs is not None or
+            self.eq_plot._resultant_freqs is not None or
+            (self._disp_meas_freqs is not None and len(self._disp_meas_freqs) > 0) or
+            bool(self._autoeq_meas_raw[0])
+        )
+        sender = self.sender()
+        if not has_meta and not has_plot_curves and sender and sender.isChecked():
+            sender.blockSignals(True)
+            sender.setChecked(False)
+            sender.blockSignals(False)
+            self._style_undergraph_toggle_buttons()
+
+            # No redundant confirmation dialogue - directly open curves assignment dialog!
+            self._open_assign_curves_dialog(active_preset)
+            return
+
         self.eq_plot.set_overlays_visible(
             self.undergraph_meas_btn.isChecked(),
             self.undergraph_target_btn.isChecked(),
             self.undergraph_resultant_btn.isChecked(),
+            show_target2=self.undergraph_target2_btn.isChecked(),
         )
 
     def _on_graph_legend_clicked(self, curve_type: str) -> None:
         if curve_type == "target":
             self.undergraph_target_btn.toggle()
+        elif curve_type == "target2":
+            self.undergraph_target2_btn.toggle()
         elif curve_type == "meas":
             self.undergraph_meas_btn.toggle()
         elif curve_type == "resultant":
             self.undergraph_resultant_btn.toggle()
+
+    def _on_add_target_clicked(self) -> None:
+        active_preset = self.preset_manager.active_preset_name
+        meta = self.preset_manager.get_preset_metadata(active_preset) or {}
+        base_url = meta.get("base_url")
+        if not base_url:
+            self._open_assign_curves_dialog(active_preset)
+            return
+
+        targets = self.squig_client.get_targets_for_provider(base_url)
+        if not targets:
+            self._open_assign_curves_dialog(active_preset)
+            return
+
+        menu = QtWidgets.QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #09090b;
+                border: 1px solid #27272a;
+                border-radius: 6px;
+                color: #f4f4f5;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item {
+                padding: 5px 14px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #ffffff;
+                color: #000000;
+                font-weight: 600;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #27272a;
+                margin: 4px 6px;
+            }
+        """)
+
+        curr_t2 = meta.get("target2_name") or meta.get("target2_file") or ""
+        p_name = meta.get("database_name") or "Provider"
+        lbl_head = menu.addAction(f"Add Target 2 ({p_name}):")
+        lbl_head.setEnabled(False)
+        menu.addSeparator()
+
+        for t in targets:
+            t_name = t.name
+            t_file = t.file_name
+            is_active = bool(curr_t2 and (curr_t2.lower() == t_name.lower() or curr_t2.lower() == t_file.lower()))
+            prefix = "✓  " if is_active else "    "
+            cat_tag = f"[{t.category}] " if t.category else ""
+            act = menu.addAction(f"{prefix}{cat_tag}{t_name}")
+            act.triggered.connect(
+                lambda checked=False, tf=t_file, tn=t_name: self._set_preset_target2(active_preset, tf, tn)
+            )
+
+        if curr_t2:
+            menu.addSeparator()
+            act_rm = menu.addAction("✕  Remove Target 2")
+            act_rm.triggered.connect(lambda: self._set_preset_target2(active_preset, None, None))
+
+        menu.addSeparator()
+        act_config = menu.addAction("Configure All Reference Curves...")
+        act_config.triggered.connect(lambda: self._open_assign_curves_dialog(active_preset))
+
+        menu.exec(self.undergraph_add_target_btn.mapToGlobal(QtCore.QPoint(0, self.undergraph_add_target_btn.height() + 2)))
+
+    def _set_preset_target2(self, preset_name: str, target_file: Optional[str], target_name: Optional[str]) -> None:
+        meta = self.preset_manager.get_preset_metadata(preset_name) or {}
+        if not meta:
+            return
+        meta["target2_file"] = target_file or ""
+        meta["target2_name"] = target_name or ""
+        self.preset_manager.set_preset_metadata(preset_name, meta)
+
+        if preset_name == self.preset_manager.active_preset_name:
+            if target_file:
+                base_u = meta.get("base_url", "")
+                from offline_db import get_offline_db
+                off_db = get_offline_db()
+                t2_res = off_db.get_target(meta.get("database_id", ""), target_file, target_name)
+                if not t2_res and base_u:
+                    try:
+                        t2_res = self.squig_client.fetch_target_curve(
+                            base_u, SquigTarget(name=target_name or target_file, file_name=target_file)
+                        )
+                    except Exception:
+                        t2_res = None
+
+                if t2_res and len(t2_res[0]) > 0 and len(t2_res[1]) > 0:
+                    t2_f, t2_s = t2_res
+                    t2_f_arr = np.asarray(t2_f, dtype=np.float64)
+                    t2_s_arr = np.asarray(t2_s, dtype=np.float64)
+                    mid_mask2 = (t2_f_arr >= 200.0) & (t2_f_arr <= 2000.0)
+                    target2_norm = float(np.mean(t2_s_arr[mid_mask2])) if np.any(mid_mask2) else float(np.mean(t2_s_arr))
+                    disp_target2 = t2_s_arr - target2_norm
+                    self.eq_plot.set_target2_overlay(t2_f_arr.tolist(), disp_target2.tolist(), label=target_name or "Target 2")
+                    self.undergraph_target2_btn.setVisible(True)
+                    self.undergraph_target2_btn.blockSignals(True)
+                    self.undergraph_target2_btn.setChecked(True)
+                    self.undergraph_target2_btn.blockSignals(False)
+                    self._style_undergraph_toggle_buttons()
+                    self.eq_plot.set_overlays_visible(
+                        self.undergraph_meas_btn.isChecked(),
+                        self.undergraph_target_btn.isChecked(),
+                        self.undergraph_resultant_btn.isChecked(),
+                        show_target2=True,
+                    )
+            else:
+                self.eq_plot.set_target2_overlay(None, None)
+                self.undergraph_target2_btn.blockSignals(True)
+                self.undergraph_target2_btn.setChecked(False)
+                self.undergraph_target2_btn.setVisible(False)
+                self.undergraph_target2_btn.blockSignals(False)
+                self._style_undergraph_toggle_buttons()
+                self.eq_plot.set_overlays_visible(
+                    self.undergraph_meas_btn.isChecked(),
+                    self.undergraph_target_btn.isChecked(),
+                    self.undergraph_resultant_btn.isChecked(),
+                    show_target2=False,
+                )
 
     def _revert_db_combo_to_active(self) -> None:
         active_id = self._active_db_info.get("id")
@@ -4548,12 +6782,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._autoeq_models = models
         self._autoeq_targets = targets
         self.autoeq_model_combo.set_models(models)
-
         rig_clean = rig.replace("clone ", "").strip()
         self.autoeq_rig_badge.setText(f"Rig: {rig} [Isolated]")
         self.autoeq_rig_badge.setToolTip(
             f"Strict Coupler Isolation: Targets and measurements are locked to this {rig_clean} database to avoid measurement mismatch."
         )
+
+        if hasattr(self, "autoeq_target_iem_combo"):
+            self.autoeq_target_iem_combo.set_models(models)
+            self.autoeq_target_iem_combo.set_provider_info(
+                self._active_db_info.get("base_url", ""),
+                self._active_db_info.get("name", ""),
+                rig,
+            )
+            self.autoeq_target_iem_badge.setText(f"Rig: {rig_clean} [Matched]")
+        self._populate_target_profiles()
 
         # Repopulate Targets (strictly scoped to this database)
         self.autoeq_target_combo.blockSignals(True)
@@ -4624,11 +6867,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_suppress_curve_fetch", False) or getattr(self.eq_plot, "_is_sweeping", False):
             return
         model: Optional[SquigModel] = self.autoeq_model_combo.currentData()
-        target: Optional[SquigTarget] = self.autoeq_target_combo.currentData()
         chan: str = self.autoeq_chan_combo.currentData() or "avg"
         base_url = self._active_db_info.get("base_url", "")
+        mode = getattr(self, "_autoeq_target_mode", 0)
 
-        if not base_url or not (model or target):
+        target: Optional[SquigTarget] = None
+        target_iem: Optional[SquigModel] = None
+        target_iem_chan: str = "avg"
+        target_profile_name: str = ""
+
+        if mode == 0:
+            target = self.autoeq_target_combo.currentData() if hasattr(self, "autoeq_target_combo") else None
+        elif mode == 1:
+            target_iem = self.autoeq_target_iem_combo.currentData() if hasattr(self, "autoeq_target_iem_combo") else None
+            target_iem_chan = self.autoeq_target_iem_chan_combo.currentData() or "avg" if hasattr(self, "autoeq_target_iem_chan_combo") else "avg"
+        elif mode == 2:
+            if hasattr(self, "autoeq_target_profile_combo"):
+                target_profile_name = self.autoeq_target_profile_combo.currentData() or self.autoeq_target_profile_combo.currentText().strip()
+
+        has_target = bool(target or target_iem or target_profile_name)
+        if not base_url or not (model or has_target):
             return
 
         if self._curve_worker and self._curve_worker.isRunning():
@@ -4639,7 +6897,13 @@ class MainWindow(QtWidgets.QMainWindow):
             client=self.squig_client,
             base_url=base_url,
             model=model,
+            target_mode=mode,
             target=target,
+            target_iem_model=target_iem,
+            target_iem_chan=target_iem_chan,
+            target_profile_name=target_profile_name,
+            preset_manager=self.preset_manager,
+            sample_rate=self.sample_rate,
             channel_mode=chan,
             parent=self,
         )
@@ -4656,13 +6920,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self._autoeq_target_raw = (tf, ts)
 
         model: Optional[SquigModel] = self.autoeq_model_combo.currentData()
-        target: Optional[SquigTarget] = self.autoeq_target_combo.currentData()
-        m_label = model.display_name if model else ""
-        t_label = target.name if target else ""
+        if model and hasattr(model, "display_name") and model.display_name:
+            m_label = model.display_name
+        elif hasattr(self, "autoeq_model_combo") and self.autoeq_model_combo.text().strip():
+            m_label = self.autoeq_model_combo.text().strip()
+        else:
+            m_label = "Measurement" if (mf and len(mf) > 0) else ""
+
+        mode = getattr(self, "_autoeq_target_mode", 0)
+        if mode == 0:
+            target = self.autoeq_target_combo.currentData() if hasattr(self, "autoeq_target_combo") else None
+            if target and hasattr(target, "name") and target.name:
+                t_label = target.name
+            elif hasattr(self, "autoeq_target_combo") and self.autoeq_target_combo.currentText().strip():
+                t_label = self.autoeq_target_combo.currentText().strip()
+            else:
+                t_label = "Target" if (tf and len(tf) > 0) else ""
+        elif mode == 1:
+            target_iem = self.autoeq_target_iem_combo.currentData() if hasattr(self, "autoeq_target_iem_combo") else None
+            t_label = f"{target_iem.display_name} (Target)" if target_iem else "Target IEM"
+            if target_iem and hasattr(self, "autoeq_target_iem_badge"):
+                t_rig = getattr(target_iem, "rig", "") or self._active_db_info.get("rig", "")
+                t_rig_clean = t_rig.replace("clone ", "").strip()
+                is_same = getattr(target_iem, "base_url", "").rstrip("/") == self._active_db_info.get("base_url", "").rstrip("/")
+                match_tag = "[Matched]" if is_same else "[External]"
+                self.autoeq_target_iem_badge.setText(f"Rig: {t_rig_clean} {match_tag}")
+        else:  # 2
+            prof_name = ""
+            if hasattr(self, "autoeq_target_profile_combo"):
+                prof_name = self.autoeq_target_profile_combo.currentData() or self.autoeq_target_profile_combo.currentText().strip()
+            t_label = f"{prof_name} (Resultant)" if prof_name else "Target Resultant"
 
         dm, dt, dr = self._compute_normalized_display_curves(mf, ms, tf, ts, self.eq_plot.bands)
 
-        if dm[0]:
+        has_dm = bool(dm[0] and len(dm[0]) > 0)
+        has_dt = bool(dt[0] and len(dt[0]) > 0)
+        has_dr = bool(dr[0] and len(dr[0]) > 0)
+
+        self.undergraph_meas_btn.blockSignals(True)
+        self.undergraph_target_btn.blockSignals(True)
+        self.undergraph_resultant_btn.blockSignals(True)
+        self.undergraph_meas_btn.setChecked(has_dm)
+        self.undergraph_target_btn.setChecked(has_dt)
+        self.undergraph_resultant_btn.setChecked(has_dr)
+        self.undergraph_meas_btn.blockSignals(False)
+        self.undergraph_target_btn.blockSignals(False)
+        self.undergraph_resultant_btn.blockSignals(False)
+
+        self.eq_plot._is_meas_checked = has_dm
+        self.eq_plot._is_target_checked = has_dt
+        self.eq_plot._is_resultant_checked = has_dr
+
+        if has_dm:
             self._disp_meas_freqs = np.asarray(dm[0], dtype=np.float64)
             self._disp_meas_spls = np.asarray(dm[1], dtype=np.float64)
             self.eq_plot.animate_overlay_curve("meas", dm[0], dm[1], label=m_label)
@@ -4671,27 +6980,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self._disp_meas_spls = None
             self.eq_plot.animate_overlay_curve("meas", None, None)
 
-        if dt[0]:
+        if has_dt:
             self.eq_plot.animate_overlay_curve("target", dt[0], dt[1], label=t_label)
         else:
             self.eq_plot.animate_overlay_curve("target", None, None)
 
-        if dr[0]:
+        if has_dr:
             r_label = f"{m_label} + EQ" if m_label else "Resultant + EQ"
             self.eq_plot.animate_overlay_curve("resultant", dr[0], dr[1], label=r_label)
         else:
             self.eq_plot.animate_overlay_curve("resultant", None, None)
 
-        self.undergraph_meas_btn.blockSignals(True)
-        self.undergraph_target_btn.blockSignals(True)
-        self.undergraph_resultant_btn.blockSignals(True)
-        self.undergraph_meas_btn.setChecked(bool(dm[0]))
-        self.undergraph_target_btn.setChecked(bool(dt[0]))
-        self.undergraph_resultant_btn.setChecked(bool(dr[0]))
-        self.undergraph_meas_btn.blockSignals(False)
-        self.undergraph_target_btn.blockSignals(False)
-        self.undergraph_resultant_btn.blockSignals(False)
-        self.eq_plot.set_overlays_visible(bool(dm[0]), bool(dt[0]), bool(dr[0]))
+        self.eq_plot.set_overlays_visible(
+            has_dm, has_dt, has_dr,
+            show_target2=self.undergraph_target2_btn.isChecked(),
+        )
         self._style_undergraph_toggle_buttons()
 
         if mf and tf:
@@ -4719,6 +7022,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.undergraph_meas_btn.isChecked(),
             self.undergraph_target_btn.isChecked(),
             self.undergraph_resultant_btn.isChecked(),
+            show_target2=self.undergraph_target2_btn.isChecked(),
         )
 
     def _update_resultant_curve(self) -> None:
@@ -4732,8 +7036,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         resultant_spls = self._disp_meas_spls + eq_response
 
-        model = self.autoeq_model_combo.currentData()
-        m_name = model.name if model else "Resultant"
+        meta = self.preset_manager.get_preset_metadata(self.preset_manager.active_preset_name)
+        m_name = (meta.get("model_name") if meta else None)
+        if not m_name:
+            model = self.autoeq_model_combo.currentData()
+            m_name = model.name if model else "Resultant"
         label = f"{m_name} + EQ"
 
         self.eq_plot.set_resultant_overlay(self._disp_meas_freqs, resultant_spls, label=label)
@@ -4741,6 +7048,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.undergraph_meas_btn.isChecked(),
             self.undergraph_target_btn.isChecked(),
             self.undergraph_resultant_btn.isChecked(),
+            show_target2=self.undergraph_target2_btn.isChecked(),
         )
 
     def _compute_autoeq(self) -> None:
@@ -4751,18 +7059,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mf, ms = self._autoeq_meas_raw
         tf, ts = self._autoeq_target_raw
+        mode = getattr(self, "_autoeq_target_mode", 0)
 
         if not mf or not tf:
             model = self.autoeq_model_combo.currentData()
-            target = self.autoeq_target_combo.currentData()
             if not model:
                 self.autoeq_status_label.setText("Please select a headphone / IEM model.")
                 self.autoeq_status_label.setStyleSheet("color: #f87171; font-size: 11px; font-weight: bold;")
                 return
-            if not target:
-                self.autoeq_status_label.setText("Please select a target curve.")
-                self.autoeq_status_label.setStyleSheet("color: #f87171; font-size: 11px; font-weight: bold;")
-                return
+
+            if mode == 0:
+                target = self.autoeq_target_combo.currentData() if hasattr(self, "autoeq_target_combo") else None
+                if not target:
+                    self.autoeq_status_label.setText("Please select a target curve.")
+                    self.autoeq_status_label.setStyleSheet("color: #f87171; font-size: 11px; font-weight: bold;")
+                    return
+            elif mode == 1:
+                target_iem = self.autoeq_target_iem_combo.currentData() if hasattr(self, "autoeq_target_iem_combo") else None
+                if not target_iem:
+                    self.autoeq_status_label.setText("Please select a target IEM / headphone to clone.")
+                    self.autoeq_status_label.setStyleSheet("color: #f87171; font-size: 11px; font-weight: bold;")
+                    return
+            elif mode == 2:
+                prof_name = ""
+                if hasattr(self, "autoeq_target_profile_combo"):
+                    prof_name = self.autoeq_target_profile_combo.currentData() or self.autoeq_target_profile_combo.currentText().strip()
+                if not prof_name:
+                    self.autoeq_status_label.setText("Please select a previous profile to match.")
+                    self.autoeq_status_label.setStyleSheet("color: #f87171; font-size: 11px; font-weight: bold;")
+                    return
+
             if not mf:
                 if self._curve_worker and self._curve_worker.isRunning():
                     self.autoeq_status_label.setText("Curve is currently downloading, please wait...")
@@ -4777,7 +7103,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.autoeq_status_label.setText("Target curve is currently downloading, please wait...")
                     self.autoeq_status_label.setStyleSheet("color: #facc15; font-size: 11px;")
                 else:
-                    self.autoeq_status_label.setText("Target curve unavailable. Please select another target.")
+                    self.autoeq_status_label.setText("Target response unavailable. Please select another target.")
                     self.autoeq_status_label.setStyleSheet("color: #f87171; font-size: 11px; font-weight: bold;")
                 return
 
@@ -4850,24 +7176,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._populate_table(result.bands)
 
         # 4. Immediate debounced Equalizer APO writer
-        model = self.autoeq_model_combo.currentData()
-        target = self.autoeq_target_combo.currentData()
-        chan = self.autoeq_chan_combo.currentData() or "avg"
-        m_name = model.name if model else "IEM"
-        t_name = target.name if target else "Target"
-        preset_name = f"AutoEQ: {m_name} ({t_name})"
-
-        autoeq_meta = {
-            "is_autoeq": True,
-            "database_id": self._active_db_info.get("id", ""),
-            "database_name": self._active_db_info.get("name", ""),
-            "base_url": self._active_db_info.get("base_url", ""),
-            "model_name": m_name,
-            "model_file": model.file_name if model else "",
-            "target_name": t_name,
-            "target_file": target.file_name if target else (target.name if target else ""),
-            "channel_mode": chan,
-        }
+        preset_name, autoeq_meta = self._build_current_autoeq_preset_meta()
 
         self.preset_manager.schedule_apo_export(
             result.preamp_db, result.bands, bypassed=self.is_eq_bypassed
@@ -4899,24 +7208,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autoeq_status_label.setStyleSheet("color: #f87171; font-size: 11px;")
 
     def _save_autoeq_profile(self) -> None:
-        model = self.autoeq_model_combo.currentData()
-        target = self.autoeq_target_combo.currentData()
-        chan = self.autoeq_chan_combo.currentData() or "avg"
-        m_name = model.name if model else "IEM"
-        t_name = target.name if target else "Target"
-        default_name = f"AutoEQ: {m_name} ({t_name})"
-
-        autoeq_meta = {
-            "is_autoeq": True,
-            "database_id": self._active_db_info.get("id", ""),
-            "database_name": self._active_db_info.get("name", ""),
-            "base_url": self._active_db_info.get("base_url", ""),
-            "model_name": m_name,
-            "model_file": model.file_name if model else "",
-            "target_name": t_name,
-            "target_file": target.file_name if target else (target.name if target else ""),
-            "channel_mode": chan,
-        }
+        default_name, autoeq_meta = self._build_current_autoeq_preset_meta()
 
         name, ok = QtWidgets.QInputDialog.getText(
             self,
@@ -4941,12 +7233,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undergraph_meas_btn.blockSignals(True)
         self.undergraph_target_btn.blockSignals(True)
         self.undergraph_resultant_btn.blockSignals(True)
+        self.undergraph_target2_btn.blockSignals(True)
         self.undergraph_meas_btn.setChecked(False)
         self.undergraph_target_btn.setChecked(False)
         self.undergraph_resultant_btn.setChecked(False)
+        self.undergraph_target2_btn.setChecked(False)
+        self.undergraph_target2_btn.setVisible(False)
         self.undergraph_meas_btn.blockSignals(False)
         self.undergraph_target_btn.blockSignals(False)
         self.undergraph_resultant_btn.blockSignals(False)
+        self.undergraph_target2_btn.blockSignals(False)
         self._style_undergraph_toggle_buttons()
         self.autoeq_status_label.setText("Overlays cleared.")
         self.autoeq_status_label.setStyleSheet("color: #71717a; font-size: 11px;")

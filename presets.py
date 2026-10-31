@@ -72,22 +72,40 @@ def clean_apo_device_name(dev_name: Optional[str]) -> str:
     return name
 
 
-def ensure_apo_root_config_include(apo_file_path: str) -> None:
+def ensure_apo_root_config_include(apo_file_path: str) -> bool:
     """
     Ensures Equalizer APO's main config.txt includes the target APO file.
+    Creates config.txt if it does not exist yet.
     Guarantees proper newline separation and cleans up legacy peqdb directives.
+    Returns True if config.txt contains the include directive.
     """
     try:
         target_dir = os.path.dirname(apo_file_path)
         config_txt = os.path.join(target_dir, "config.txt")
         if not os.path.exists(config_txt):
-            alt_config = r"C:\Program Files\EqualizerAPO\config\config.txt"
-            if os.path.exists(alt_config):
-                config_txt = alt_config
+            cfg_dir = get_apo_config_dir()
+            if cfg_dir and os.path.isdir(cfg_dir):
+                config_txt = os.path.join(cfg_dir, "config.txt")
+            elif os.path.isdir(target_dir):
+                config_txt = os.path.join(target_dir, "config.txt")
+            elif os.path.isdir(r"C:\Program Files\EqualizerAPO\config"):
+                config_txt = r"C:\Program Files\EqualizerAPO\config\config.txt"
             else:
-                return
+                return False
 
         base_name = os.path.basename(apo_file_path)
+
+        # If config.txt does not exist, create it with include directive
+        if not os.path.exists(config_txt):
+            try:
+                os.makedirs(os.path.dirname(config_txt), exist_ok=True)
+                with open(config_txt, "w", encoding="utf-8") as f:
+                    f.write(f"# Equalizer APO Main Configuration\nInclude: {base_name}\n")
+                return True
+            except Exception as e:
+                print(f"[PresetManager] Notice: Could not create config.txt: {e}")
+                return False
+
         with open(config_txt, "r", encoding="utf-8", errors="replace") as f:
             existing_lines = [line.strip() for line in f.read().splitlines() if line.strip()]
 
@@ -108,12 +126,144 @@ def ensure_apo_root_config_include(apo_file_path: str) -> None:
         if changed:
             with open(config_txt, "w", encoding="utf-8") as f:
                 f.write("\n".join(cleaned_lines) + "\n")
+        return True
     except Exception as e:
         print(f"[PresetManager] Notice: Could not update config.txt: {e}")
+        return False
+
+
+def get_apo_install_dir() -> Optional[str]:
+    """Finds the installed Equalizer APO directory from registry or filesystem."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\EqualizerAPO") as k:
+            val, _ = winreg.QueryValueEx(k, "InstallPath")
+            if val and os.path.isdir(val):
+                return val
+    except Exception:
+        pass
+
+    candidates = [
+        r"C:\Program Files\EqualizerAPO",
+        r"C:\Program Files (x86)\EqualizerAPO",
+    ]
+    for c in candidates:
+        if os.path.isdir(c) and (
+            os.path.exists(os.path.join(c, "EqualizerAPO.dll"))
+            or os.path.exists(os.path.join(c, "Configurator.exe"))
+            or os.path.exists(os.path.join(c, "DeviceSelector.exe"))
+        ):
+            return c
+    return None
+
+
+def get_apo_config_dir() -> Optional[str]:
+    """Finds Equalizer APO config directory."""
+    inst = get_apo_install_dir()
+    if inst:
+        cfg = os.path.join(inst, "config")
+        if os.path.isdir(cfg):
+            return cfg
+    if os.path.isdir(r"C:\Program Files\EqualizerAPO\config"):
+        return r"C:\Program Files\EqualizerAPO\config"
+    return None
+
+
+def is_equalizer_apo_installed() -> bool:
+    """Returns True if Equalizer APO is installed on this machine."""
+    return get_apo_install_dir() is not None
+
+
+def get_bundled_apo_installer_path() -> Optional[str]:
+    """Finds the bundled Equalizer APO installer executable if present."""
+    base_dirs = [
+        getattr(sys, "_MEIPASS", ""),
+        os.path.dirname(os.path.abspath(__file__)),
+        os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)),
+    ]
+    names = [
+        "EqualizerAPO-x64-1.4.2.exe",
+        "EqualizerAPO-x64.exe",
+        "EqualizerAPO_setup.exe",
+    ]
+    for b in base_dirs:
+        if not b:
+            continue
+        for n in names:
+            p = os.path.join(b, "assets", n)
+            if os.path.isfile(p):
+                return p
+            p_root = os.path.join(b, n)
+            if os.path.isfile(p_root):
+                return p_root
+        assets_dir = os.path.join(b, "assets")
+        if os.path.isdir(assets_dir):
+            try:
+                for f in os.listdir(assets_dir):
+                    if f.lower().startswith("equalizerapo") and f.lower().endswith(".exe"):
+                        return os.path.join(assets_dir, f)
+            except Exception:
+                pass
+    return None
+
+
+def launch_apo_installer(installer_path: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Safely extracts (if running from PyInstaller bundle) and launches the
+    Equalizer APO installer with Administrator elevation (UAC prompt).
+    Returns (success: bool, message: str).
+    """
+    import ctypes
+    import tempfile
+    import shutil
+
+    if not installer_path:
+        installer_path = get_bundled_apo_installer_path()
+
+    if not installer_path or not os.path.isfile(installer_path):
+        return False, "Equalizer APO installer was not found in application bundle."
+
+    try:
+        temp_dir = tempfile.gettempdir()
+        target_name = os.path.basename(installer_path)
+        target_installer = os.path.join(temp_dir, target_name)
+
+        if os.path.abspath(installer_path) != os.path.abspath(target_installer):
+            try:
+                shutil.copy2(installer_path, target_installer)
+                run_path = target_installer
+            except Exception:
+                run_path = installer_path
+        else:
+            run_path = installer_path
+
+        res = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", run_path, None, temp_dir, 1
+        )
+        if res > 32:
+            return True, "Equalizer APO installer launched successfully."
+        elif res == 5:
+            return False, "Administrator elevation was cancelled by user."
+        else:
+            res2 = ctypes.windll.shell32.ShellExecuteW(
+                None, "open", run_path, None, temp_dir, 1
+            )
+            if res2 > 32:
+                return True, "Equalizer APO installer launched."
+            return False, f"Could not launch installer (Error code {res})."
+    except Exception as e:
+        return False, f"Failed to launch installer: {e}"
 
 
 def get_apo_configurator_path() -> Optional[str]:
     """Finds Equalizer APO DeviceSelector.exe or Configurator.exe path."""
+    inst = get_apo_install_dir()
+    if inst:
+        for name in ["DeviceSelector.exe", "Configurator.exe"]:
+            p = os.path.join(inst, name)
+            if os.path.exists(p):
+                return p
+
     candidates = [
         r"C:\Program Files\EqualizerAPO\DeviceSelector.exe",
         r"C:\Program Files\EqualizerAPO\Configurator.exe",
@@ -319,35 +469,52 @@ class PresetManager(QtCore.QObject):
     # -------------------------------------------------------------------------
     # Settings & Persistence
     # -------------------------------------------------------------------------
+    def is_apo_installed(self) -> bool:
+        """Returns True if Equalizer APO is installed on this PC."""
+        return is_equalizer_apo_installed()
+
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        return self.settings.get(key, default)
+
+    def set_setting(self, key: str, value: Any) -> None:
+        self.settings[key] = value
+        self.save_settings()
+
     def _load_settings(self) -> None:
+        self.settings = {}
         if os.path.exists(SETTINGS_FILE):
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                    settings = json.load(f)
-                    self.apo_target_path = settings.get("apo_path", DEFAULT_APO_PATH)
-                    self.active_preset_name = settings.get("active_preset", "Flat (Default)")
-                    self.audio_device_index = settings.get("audio_device_index", None)
-                    self.active_device_name = settings.get("active_device_name", None)
-                    self.favorite_databases = settings.get(
+                    self.settings = json.load(f)
+                    self.apo_target_path = self.settings.get("apo_path", DEFAULT_APO_PATH)
+                    self.active_preset_name = self.settings.get("active_preset", "Flat (Default)")
+                    self.audio_device_index = self.settings.get("audio_device_index", None)
+                    self.active_device_name = self.settings.get("active_device_name", None)
+                    self.favorite_databases = self.settings.get(
                         "favorite_databases",
                         ["peqdb", "superreview", "superreview_hp", "jaraba", "aden"],
                     )
             except Exception as e:
                 print(f"[PresetManager] Error loading settings: {e}")
+                self.settings = {}
         else:
+            self.apo_target_path = DEFAULT_APO_PATH
+
+        # If Equalizer APO is detected and target was set to fallback, restore default APO path
+        if is_equalizer_apo_installed() and (not self.apo_target_path or self.apo_target_path == LOCAL_FALLBACK_PATH):
             self.apo_target_path = DEFAULT_APO_PATH
 
     def save_settings(self) -> None:
         try:
-            settings = {
+            self.settings.update({
                 "apo_path": self.apo_target_path,
                 "active_preset": self.active_preset_name,
                 "audio_device_index": self.audio_device_index,
                 "active_device_name": self.active_device_name,
                 "favorite_databases": self.favorite_databases,
-            }
+            })
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2)
+                json.dump(self.settings, f, indent=2)
         except Exception as e:
             print(f"[PresetManager] Error saving settings: {e}")
 
@@ -456,6 +623,23 @@ class PresetManager(QtCore.QObject):
 
     def get_preset_metadata(self, name: str) -> Optional[Dict[str, Any]]:
         return self.presets.get(name, {}).get("autoeq")
+
+    def has_preset_metadata(self, name: str) -> bool:
+        meta = self.get_preset_metadata(name)
+        return bool(meta and (meta.get("is_autoeq") or meta.get("model_file") or meta.get("target_file")))
+
+    def set_preset_metadata(self, name: str, metadata: Optional[Dict[str, Any]]) -> bool:
+        name = name.strip()
+        if name not in self.presets:
+            return False
+        if metadata:
+            self.presets[name]["autoeq"] = metadata
+        else:
+            self.presets[name].pop("autoeq", None)
+        self.save_presets()
+        self.save_settings()
+        self.sigPresetsListChanged.emit()
+        return True
 
     def save_or_update_preset(
         self,

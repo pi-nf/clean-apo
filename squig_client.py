@@ -5,6 +5,7 @@ with local disk caching for full offline capability. Enforces strict rig isolati
 """
 
 from __future__ import annotations
+import sys
 import os
 import re
 import json
@@ -636,6 +637,70 @@ class SquigClient:
                     )
                 )
 
+        # Fallback to catalog targets if targets array could not be parsed from config.js
+        if not targets:
+            clean_url = base_url.rstrip("/")
+            cat = self.get_global_catalog()
+            for c in cat:
+                if c.get("base_url", "").rstrip("/") == clean_url:
+                    for t_name in c.get("targets", []):
+                        clean_t = str(t_name).strip()
+                        if clean_t and clean_t not in seen_targets:
+                            seen_targets.add(clean_t)
+                            file_str = clean_t if clean_t.lower().endswith("target") else f"{clean_t} Target"
+                            targets.append(
+                                SquigTarget(
+                                    name=clean_t.replace(" Target", "").strip(),
+                                    file_name=file_str,
+                                    category="Reference",
+                                )
+                            )
+                    break
+
+        # Fallback to offline_db targets
+        if not targets:
+            db_id = self._get_db_id(base_url)
+            try:
+                import sqlite3
+                if os.path.exists(self.offline_db.db_path):
+                    with sqlite3.connect(self.offline_db.db_path) as conn:
+                        c = conn.cursor()
+                        c.execute(
+                            "SELECT DISTINCT target_file, target_name FROM targets WHERE db_id = ?",
+                            (db_id,)
+                        )
+                        for tf, tn in c.fetchall():
+                            t_clean = (tn or tf or "").replace(" Target", "").replace(".txt", "").strip()
+                            if t_clean and t_clean not in seen_targets:
+                                seen_targets.add(t_clean)
+                                targets.append(
+                                    SquigTarget(
+                                        name=t_clean,
+                                        file_name=tf or f"{t_clean} Target",
+                                        category="Offline Reference",
+                                    )
+                                )
+            except Exception:
+                pass
+
+        # Final fallback to standard targets matching the coupler rig
+        if not targets:
+            is_hp = "headphone" in base_url.lower() or "ears" in rig_desc.lower() or "kb006" in rig_desc.lower()
+            if is_hp:
+                std = ["Harman OE 2018", "Diffuse Field", "Free Field", "KEMAR DF"]
+            else:
+                std = ["Harman IE 2019", "IEF Neutral 2023", "Diffuse Field", "AutoEQ"]
+            for s in std:
+                if s not in seen_targets:
+                    seen_targets.add(s)
+                    targets.append(
+                        SquigTarget(
+                            name=s,
+                            file_name=f"{s} Target",
+                            category="Standard Reference",
+                        )
+                    )
+
         # Save metadata to cache
         try:
             with open(meta_file, "w", encoding="utf-8") as f:
@@ -1096,6 +1161,46 @@ class SquigClient:
                     return freqs, spls
 
         return [], []
+
+    def get_targets_for_provider(self, base_url: str) -> List[SquigTarget]:
+        """Returns the list of target curves for the given provider base URL."""
+        if not base_url:
+            return []
+        # 1. In-memory index
+        if base_url in self._in_memory_indices:
+            return self._in_memory_indices[base_url][1]
+        # 2. Disk cache
+        db_dir = self._get_db_cache_dir(base_url)
+        meta_file = os.path.join(db_dir, "_index_meta.json")
+        if os.path.exists(meta_file):
+            try:
+                with open(meta_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    targets = [SquigTarget(**t) for t in data.get("targets", [])]
+                    if targets:
+                        return targets
+            except Exception:
+                pass
+        # 3. Global catalog
+        clean_url = base_url.rstrip("/")
+        cat = self.get_global_catalog()
+        for c in cat:
+            if c.get("base_url", "").rstrip("/") == clean_url:
+                targets = []
+                for t in c.get("targets", []):
+                    targets.append(SquigTarget(
+                        name=t,
+                        file_name=f"{t} Target" if not t.lower().endswith("target") else t,
+                        category="Reference",
+                    ))
+                if targets:
+                    return targets
+        # 4. Standard coupler fallbacks
+        return [
+            SquigTarget("Harman IE 2019 v2", "Harman IE 2019 v2 Target", "Standard"),
+            SquigTarget("IEF Neutral", "IEF Neutral Target", "Reference"),
+            SquigTarget("JM-1", "JM-1 Target", "Reference"),
+        ]
 
     def clear_database_cache(self, base_url: str) -> None:
         """Clears local cached files for a specific database."""

@@ -4,6 +4,7 @@ and cubic-smoothed sweeping graph transition animations.
 """
 
 from __future__ import annotations
+import sys
 import math
 import os
 from typing import List, Dict, Optional, Tuple
@@ -321,7 +322,7 @@ class EQNodeItem(pg.GraphicsObject):
         # 3. Bold Band Number Typography
         font = QtGui.QFont("Segoe UI", 9, QtGui.QFont.Weight.Bold)
         painter.setFont(font)
-        text_rect = QtCore.QRectF(-self.radius, -self.radius, 2 * self.radius, 2 * self.radius)
+        text_rect = QtCore.QRectF(-self.radius, -self.radius - 1.0, 2 * self.radius, 2 * self.radius)
         painter.drawText(text_rect, QtCore.Qt.AlignmentFlag.AlignCenter, str(self.band.band_id))
 
     # -------------------------------------------------------------------------
@@ -706,6 +707,15 @@ class EQPlotWidget(pg.PlotWidget):
         self.target_curve.setVisible(False)
         self.addItem(self.target_curve)
 
+        # Secondary Target Reference Curve (distinct dashed violet/purple line)
+        self.target2_curve = pg.PlotCurveItem(
+            pen=pg.mkPen(QtGui.QColor(192, 132, 252, 200), width=1.8, style=QtCore.Qt.PenStyle.DashLine),
+            antialias=True,
+        )
+        self.target2_curve.setZValue(5)
+        self.target2_curve.setVisible(False)
+        self.addItem(self.target2_curve)
+
         # Resultant Predicted Response Curve (Model + EQ in crisp cyan)
         self.resultant_curve = pg.PlotCurveItem(
             pen=pg.mkPen(QtGui.QColor(56, 189, 248, 220), width=1.8),
@@ -773,6 +783,9 @@ class EQPlotWidget(pg.PlotWidget):
         self._target_freqs: Optional[np.ndarray] = None
         self._target_spls: Optional[np.ndarray] = None
         self._target_label: str = ""
+        self._target2_freqs: Optional[np.ndarray] = None
+        self._target2_spls: Optional[np.ndarray] = None
+        self._target2_label: str = ""
         self._resultant_freqs: Optional[np.ndarray] = None
         self._resultant_spls: Optional[np.ndarray] = None
         self._resultant_label: str = ""
@@ -1162,7 +1175,7 @@ class EQPlotWidget(pg.PlotWidget):
         if self._sweep_meas_animating:
             self._sweep_meas_animating = False
             self.meas_curve.setOpacity(1.0)
-            if self._pending_final_meas and self._sweep_target_meas_opacity > 0.5:
+            if self._pending_final_meas:
                 mf, ms, mlbl = self._pending_final_meas
                 self.set_measurement_overlay(mf, ms, label=mlbl)
             else:
@@ -1171,7 +1184,7 @@ class EQPlotWidget(pg.PlotWidget):
         if self._sweep_target_animating:
             self._sweep_target_animating = False
             self.target_curve.setOpacity(1.0)
-            if self._pending_final_target and self._sweep_target_target_opacity > 0.5:
+            if self._pending_final_target:
                 tf, ts, tlbl = self._pending_final_target
                 self.set_target_overlay(tf, ts, label=tlbl)
             else:
@@ -1180,7 +1193,7 @@ class EQPlotWidget(pg.PlotWidget):
         if self._sweep_resultant_animating:
             self._sweep_resultant_animating = False
             self.resultant_curve.setOpacity(1.0)
-            if self._pending_final_resultant and self._sweep_target_resultant_opacity > 0.5:
+            if self._pending_final_resultant:
                 rf, rs, rlbl = self._pending_final_resultant
                 self.set_resultant_overlay(rf, rs, label=rlbl)
             else:
@@ -1222,16 +1235,34 @@ class EQPlotWidget(pg.PlotWidget):
 
         is_checked = getattr(self, f"_is_{curve_name}_checked", True)
         if freqs is not None and len(freqs) > 0 and spls is not None and len(spls) > 0:
-            target_sampled = np.interp(self.freq_points, freqs, spls)
-            target_op = 1.0 if is_checked else 0.0
-            final_data = (freqs, spls, label)
+            f_arr = np.asarray(freqs, dtype=np.float64)
+            s_arr = np.asarray(spls, dtype=np.float64)
+            valid = (f_arr >= MIN_FREQ) & (f_arr <= MAX_FREQ)
+            if np.any(valid):
+                target_sampled = np.interp(self.freq_points, f_arr[valid], s_arr[valid])
+                target_op = 1.0 if is_checked else 0.0
+                final_data = (f_arr[valid], s_arr[valid], label)
+                setattr(self, f"_{curve_name}_freqs", f_arr[valid])
+                setattr(self, f"_{curve_name}_spls", s_arr[valid])
+                setattr(self, f"_{curve_name}_label", label)
+            else:
+                target_sampled = np.copy(old_sampled)
+                target_op = 0.0
+                final_data = None
+                setattr(self, f"_{curve_name}_freqs", None)
+                setattr(self, f"_{curve_name}_spls", None)
+                setattr(self, f"_{curve_name}_label", "")
         else:
             target_sampled = np.copy(old_sampled)
             target_op = 0.0
             final_data = None
+            setattr(self, f"_{curve_name}_freqs", None)
+            setattr(self, f"_{curve_name}_spls", None)
+            setattr(self, f"_{curve_name}_label", "")
 
         self._anim_overlay_types[curve_name] = (old_sampled, target_sampled, old_op, target_op, final_data)
-        curve_item.setVisible(True)
+        curve_item.setVisible(is_checked and (target_op > 0.0 or old_op > 0.0))
+        self._update_overlay_legend()
 
         self._overlay_anim.stop()
         self._overlay_anim.setDuration(duration)
@@ -1252,23 +1283,26 @@ class EQPlotWidget(pg.PlotWidget):
             if curve_item:
                 blended = (1.0 - alpha) * old_s + alpha * target_s
                 curve_item.setData(self.x_log_points, blended)
-                op = (1.0 - p) * old_op + p * target_op
+                is_chk = getattr(self, f"_is_{cname}_checked", True)
+                cur_target_op = 1.0 if is_chk else 0.0
+                op = (1.0 - p) * old_op + p * cur_target_op
                 curve_item.setOpacity(op)
-                curve_item.setVisible(op > 0.01)
+                curve_item.setVisible(is_chk and (op > 0.01))
 
     def _on_overlay_anim_finished(self) -> None:
-        for cname, (_, _, _, target_op, final_data) in list(self._anim_overlay_types.items()):
+        for cname, (_, _, _, _, final_data) in list(self._anim_overlay_types.items()):
             curve_item = getattr(self, f"{cname}_curve", None)
             if curve_item:
                 curve_item.setOpacity(1.0)
                 setter = getattr(self, f"set_{cname}_overlay", None)
                 if setter:
-                    if target_op > 0.5 and final_data:
+                    if final_data:
                         f, s, lbl = final_data
                         setter(f, s, label=lbl)
                     else:
                         setter(None, None)
         self._anim_overlay_types.clear()
+        self._update_overlay_legend()
 
     # -------------------------------------------------------------------------
     # Band Synchronization
@@ -1465,7 +1499,7 @@ class EQPlotWidget(pg.PlotWidget):
 
         x_log = np.log10(self._meas_freqs)
         self.meas_curve.setData(x_log, self._meas_spls)
-        self.meas_curve.setVisible(True)
+        self.meas_curve.setVisible(getattr(self, "_is_meas_checked", True))
         self._update_overlay_legend()
 
     def set_target_overlay(
@@ -1513,7 +1547,37 @@ class EQPlotWidget(pg.PlotWidget):
 
         x_log = np.log10(self._target_freqs)
         self.target_curve.setData(x_log, self._target_spls)
-        self.target_curve.setVisible(True)
+        self.target_curve.setVisible(getattr(self, "_is_target_checked", True))
+        self._update_overlay_legend()
+
+    def set_target2_overlay(
+        self,
+        freqs: Optional[Sequence[float]],
+        spls: Optional[Sequence[float]],
+        label: str = "",
+    ) -> None:
+        if freqs is None or spls is None or len(freqs) == 0:
+            self.target2_curve.setData([], [])
+            self.target2_curve.setVisible(False)
+            self._target2_freqs = None
+            self._target2_spls = None
+            self._target2_label = ""
+            self._update_overlay_legend()
+            return
+
+        f_arr = np.asarray(freqs, dtype=np.float64)
+        s_arr = np.asarray(spls, dtype=np.float64)
+        valid = (f_arr >= MIN_FREQ) & (f_arr <= MAX_FREQ)
+        if not np.any(valid):
+            return
+
+        self._target2_freqs = f_arr[valid]
+        self._target2_spls = s_arr[valid]
+        self._target2_label = label
+
+        x_log = np.log10(self._target2_freqs)
+        self.target2_curve.setData(x_log, self._target2_spls)
+        self.target2_curve.setVisible(getattr(self, "_is_target2_checked", True))
         self._update_overlay_legend()
 
     def set_resultant_overlay(
@@ -1562,7 +1626,7 @@ class EQPlotWidget(pg.PlotWidget):
 
         x_log = np.log10(self._resultant_freqs)
         self.resultant_curve.setData(x_log, self._resultant_spls)
-        self.resultant_curve.setVisible(True)
+        self.resultant_curve.setVisible(getattr(self, "_is_resultant_checked", True))
         self._update_overlay_legend()
 
     def clear_overlays(self) -> None:
@@ -1575,15 +1639,18 @@ class EQPlotWidget(pg.PlotWidget):
             self._sweep_target_resultant_opacity = 0.0
             self._meas_label = ""
             self._target_label = ""
+            self._target2_label = ""
             self._resultant_label = ""
             self._update_overlay_legend()
             return
 
         self.meas_curve.setData([], [])
         self.target_curve.setData([], [])
+        self.target2_curve.setData([], [])
         self.resultant_curve.setData([], [])
         self.meas_curve.setVisible(False)
         self.target_curve.setVisible(False)
+        self.target2_curve.setVisible(False)
         self.resultant_curve.setVisible(False)
         self._meas_freqs = None
         self._meas_spls = None
@@ -1591,15 +1658,25 @@ class EQPlotWidget(pg.PlotWidget):
         self._target_freqs = None
         self._target_spls = None
         self._target_label = ""
+        self._target2_freqs = None
+        self._target2_spls = None
+        self._target2_label = ""
         self._resultant_freqs = None
         self._resultant_spls = None
         self._resultant_label = ""
         self._update_overlay_legend()
 
-    def set_overlays_visible(self, show_meas: bool, show_target: bool, show_resultant: bool = True) -> None:
+    def set_overlays_visible(
+        self,
+        show_meas: bool,
+        show_target: bool,
+        show_resultant: bool = True,
+        show_target2: bool = True,
+    ) -> None:
         self._is_meas_checked = show_meas
         self._is_target_checked = show_target
         self._is_resultant_checked = show_resultant
+        self._is_target2_checked = show_target2
         if self._is_sweeping:
             self._sweep_target_meas_opacity = 1.0 if show_meas else 0.0
             self._sweep_target_target_opacity = 1.0 if show_target else 0.0
@@ -1607,6 +1684,7 @@ class EQPlotWidget(pg.PlotWidget):
         else:
             self.meas_curve.setVisible(show_meas and (self._meas_freqs is not None))
             self.target_curve.setVisible(show_target and (self._target_freqs is not None))
+            self.target2_curve.setVisible(show_target2 and (self._target2_freqs is not None))
             self.resultant_curve.setVisible(show_resultant and (self._resultant_freqs is not None))
         self._update_overlay_legend()
 
@@ -1618,6 +1696,13 @@ class EQPlotWidget(pg.PlotWidget):
             decor = "text-decoration: none;" if vis else "text-decoration: line-through; opacity: 0.55;"
             txt = f"— Target: {self._target_label}"
             items.append(("target", txt, f"<span style='color: {color}; font-weight: 600; {decor}'>{txt}</span>"))
+
+        if self._target2_label:
+            vis2 = self.target2_curve.isVisible()
+            color2 = "#c084fc" if vis2 else "#71717a"
+            decor2 = "text-decoration: none;" if vis2 else "text-decoration: line-through; opacity: 0.55;"
+            txt2 = f"— Target 2: {self._target2_label}"
+            items.append(("target2", txt2, f"<span style='color: {color2}; font-weight: 600; {decor2}'>{txt2}</span>"))
 
         if self._meas_label:
             vis = self.meas_curve.isVisible()

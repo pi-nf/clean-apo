@@ -15,10 +15,12 @@ A native, high-performance desktop equalizer application for Windows built with 
 3. Double-click `CleanAPO.exe` to run.
 
 > [!NOTE]
+> **Do I need to download or install Equalizer APO beforehand?**
+> **No.** Clean APO has the official **Equalizer APO x64 (v1.4.2)** installer **bundled directly inside the executable**.
+> If Equalizer APO is not installed on your system, Clean APO automatically detects it on first launch and provides an instant 1-click installer wizard that sets up your playback devices and links the configuration files automatically.
+> 
 > **Do I need Peace installed?**
-> **No.** Clean APO is a 100% modern, standalone replacement for Peace Equalizer. It writes directly to Equalizer APO and automatically configures `Include: clean_apo_generated.txt`. Peace is never needed.
->
-> If you do not have Equalizer APO installed on your PC, Clean APO will still run in standalone mode for curve design, AutoEQ optimization, REW/Peace importing, and live audio spectrum analysis. To apply your EQ profiles system-wide to Windows audio, simply install [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) (free & open source).
+> **No.** Clean APO is a modern, lightweight, standalone alternative to Peace Equalizer. It communicates directly with Equalizer APO and automatically maintains `Include: clean_apo_generated.txt`. Peace is never required.
 
 ---
 
