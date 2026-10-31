@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 import time
 import queue
+import threading
 from typing import Optional, Tuple, List
 import numpy as np
 import scipy.sparse as sp
@@ -165,10 +166,10 @@ class AudioSpectrumWorker(QtCore.QThread):
         self._rta_matrix = self._build_rta_matrix(self.sample_rate)
 
         self._smoothed_mags = np.full(target_points, -20.0, dtype=np.float32)
-        self._running = False
+        self._stop_event = threading.Event()
+        self._restart_event = threading.Event()
         self._enabled = True
         self._device_index: Optional[int] = None
-        self._restart_requested = False
         
         # Dynamic AGC normalization gain
         self._agc_gain_db = 38.0
@@ -222,18 +223,19 @@ class AudioSpectrumWorker(QtCore.QThread):
         """Switches the active audio loopback capture device."""
         if self._device_index != device_index:
             self._device_index = device_index
-            self._restart_requested = True
+            self._restart_event.set()
 
     def stop(self) -> None:
         """Stops the worker thread cleanly."""
-        self._running = False
-        self.wait(1000)
+        self._stop_event.set()
+        if not self.wait(1000):
+            print("[AudioStream] Warning: worker thread did not stop within 1000ms.")
 
     def run(self) -> None:
-        self._running = True
+        self._stop_event.clear()
 
-        while self._running:
-            self._restart_requested = False
+        while not self._stop_event.is_set():
+            self._restart_event.clear()
             while not self._audio_queue.empty():
                 try:
                     self._audio_queue.get_nowait()
@@ -247,7 +249,7 @@ class AudioSpectrumWorker(QtCore.QThread):
             else:
                 self._run_fallback_decay_loop()
 
-            if not self._restart_requested:
+            if not self._restart_event.is_set():
                 break
 
     # -------------------------------------------------------------------------
@@ -299,7 +301,7 @@ class AudioSpectrumWorker(QtCore.QThread):
                 return
 
             new_rate = int(loopback_device["defaultSampleRate"])
-            if self._rta_matrix is None or new_rate != self.sample_rate:
+            if new_rate != self.sample_rate:
                 self.sample_rate = new_rate
                 self._rta_matrix = self._build_rta_matrix(self.sample_rate)
             channels = int(loopback_device["maxInputChannels"])
@@ -396,7 +398,7 @@ class AudioSpectrumWorker(QtCore.QThread):
         last_audio_activity_time = 0.0
         buffer = np.zeros(self.window_size, dtype=np.float32)
 
-        while self._running and not self._restart_requested:
+        while not self._stop_event.is_set() and not self._restart_event.is_set():
             # 1. Fetch available chunk with small timeout
             try:
                 chunk = self._audio_queue.get(timeout=0.015)
@@ -404,8 +406,9 @@ class AudioSpectrumWorker(QtCore.QThread):
                     if len(chunk) >= self.window_size:
                         buffer[:] = chunk[-self.window_size:]
                     else:
-                        buffer = np.roll(buffer, -len(chunk))
-                        buffer[-len(chunk):] = chunk
+                        n = len(chunk)
+                        buffer[:-n] = buffer[n:]
+                        buffer[-n:] = chunk
                     if np.sqrt(np.mean(chunk**2)) > 1e-5:
                         last_audio_activity_time = time.perf_counter()
             except queue.Empty:
@@ -419,8 +422,9 @@ class AudioSpectrumWorker(QtCore.QThread):
                         if len(chunk) >= self.window_size:
                             buffer[:] = chunk[-self.window_size:]
                         else:
-                            buffer = np.roll(buffer, -len(chunk))
-                            buffer[-len(chunk):] = chunk
+                            n = len(chunk)
+                            buffer[:-n] = buffer[n:]
+                            buffer[-n:] = chunk
                         if np.sqrt(np.mean(chunk**2)) > 1e-5:
                             last_audio_activity_time = time.perf_counter()
                 except queue.Empty:
@@ -467,7 +471,7 @@ class AudioSpectrumWorker(QtCore.QThread):
                 last_emit_time = now
 
     def _run_fallback_decay_loop(self) -> None:
-        while self._running and not self._restart_requested:
+        while not self._stop_event.is_set() and not self._restart_event.is_set():
             self.msleep(40)
             if self._enabled:
                 self._smoothed_mags = np.maximum(-20.0, self._smoothed_mags - 0.75)

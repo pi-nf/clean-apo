@@ -9,6 +9,7 @@ import os
 import sys
 import math
 import urllib.parse
+from collections import deque
 from typing import Optional, List, Dict, Tuple
 import numpy as np
 
@@ -77,9 +78,11 @@ class DatabaseIndexWorker(QtCore.QThread):
     def run(self) -> None:
         try:
             models, targets, rig = self.client.fetch_database_index(self.base_url, self.force_refresh)
-            self.sigIndexLoaded.emit(models, targets, rig)
+            if not self.isInterruptionRequested():
+                self.sigIndexLoaded.emit(models, targets, rig)
         except Exception as e:
-            self.sigIndexFailed.emit(str(e))
+            if not self.isInterruptionRequested():
+                self.sigIndexFailed.emit(str(e))
 
 
 class CurveFetchWorker(QtCore.QThread):
@@ -146,7 +149,6 @@ class CurveFetchWorker(QtCore.QThread):
                         meas_res = None
                         if db_id and m_file:
                             try:
-                                from offline_db import get_offline_db
                                 meas_res = get_offline_db().get_measurement(db_id, m_file, p_chan)
                             except Exception:
                                 meas_res = None
@@ -179,9 +181,11 @@ class CurveFetchWorker(QtCore.QThread):
                             )
                             tf, ts = (f_grid.tolist(), eq_resp.tolist())
 
-            self.sigCurvesLoaded.emit((mf, ms), (tf, ts))
+            if not self.isInterruptionRequested():
+                self.sigCurvesLoaded.emit((mf, ms), (tf, ts))
         except Exception as e:
-            self.sigCurveFailed.emit(str(e))
+            if not self.isInterruptionRequested():
+                self.sigCurveFailed.emit(str(e))
 
 
 # -----------------------------------------------------------------------------
@@ -306,11 +310,13 @@ def apply_frameless_window_shadow(widget: QtWidgets.QWidget) -> None:
         m = MARGINS(1, 1, 1, 1)
         ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
 
-        # Windows 11 DWM rounded corners attribute (DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2)
-        pref = ctypes.c_int(2)
+        # Windows 11 DWM rounded corners attribute
+        DWMWA_WINDOW_CORNER_PREFERENCE = 33
+        DWMWCP_ROUND = 2
+        pref = ctypes.c_int(DWMWCP_ROUND)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd,
-            33,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
             ctypes.byref(pref),
             ctypes.sizeof(pref)
         )
@@ -1079,21 +1085,6 @@ class SearchableDatabaseInput(QtWidgets.QLineEdit):
         if event.key() in (QtCore.Qt.Key.Key_Down, QtCore.Qt.Key.Key_F4):
             if not self.completer.popup().isVisible():
                 self._show_suggestions(force_all=True)
-                return
-        super().keyPressEvent(event)
-
-    def hideEvent(self, event: QtGui.QHideEvent) -> None:
-        super().hideEvent(event)
-        try:
-            if hasattr(self, "completer") and self.completer.popup().isVisible():
-                self.completer.popup().hide()
-        except Exception:
-            pass
-
-    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
-        if event.key() in (QtCore.Qt.Key.Key_Down, QtCore.Qt.Key.Key_F4):
-            if not self.completer.popup().isVisible():
-                self._show_suggestions(force_all=False)
                 return
         super().keyPressEvent(event)
 
@@ -3287,18 +3278,8 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         if worker and worker.isRunning():
             self.start_btn.setEnabled(False)
             self.start_btn.setText("Stopping...")
-            QtWidgets.QApplication.processEvents()
+            self.phase_lbl.setText("Cancelling sync...")
             worker.cancel()
-            worker.wait(800)
-            self.start_btn.setEnabled(True)
-            self.start_btn.setText("Start Sync")
-            self.start_btn.setObjectName("primaryActionBtn")
-            self.start_btn.setStyleSheet("")
-            self.phase_lbl.setText("Sync stopped.")
-            self.scope_list.setEnabled(True)
-            self._refresh_stats()
-            if self.main_win and hasattr(self.main_win, "_update_offline_db_badge"):
-                self.main_win._update_offline_db_badge()
             return
 
         cur_item = self.scope_list.currentItem()
@@ -3311,9 +3292,8 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         self.phase_lbl.setText("Initializing sync...")
         self.detail_lbl.setText("Connecting to database servers...")
         self.scope_list.setEnabled(False)
-        QtWidgets.QApplication.processEvents()
 
-        new_worker = OfflineSyncWorker(self.client, scope=scope, max_workers=24, parent=self.main_win)
+        new_worker = OfflineSyncWorker(self.client, scope=scope, max_workers=12, parent=self.main_win)
         if self.main_win:
             self.main_win.offline_sync_worker = new_worker
             new_worker.sigProgress.connect(self.main_win._on_bg_sync_progress)
@@ -3336,15 +3316,22 @@ class OfflineSyncDialog(QtWidgets.QDialog):
         self.size_stat_val.setText(f"{size_mb} MB")
 
     def _on_finished(self, new_saved: int, total_meas: int, total_targets: int) -> None:
+        self.start_btn.setEnabled(True)
         self.start_btn.setText("Start Sync")
         self.start_btn.setObjectName("primaryActionBtn")
         self.start_btn.setStyleSheet("")
         self.scope_list.setEnabled(True)
-        self.progress_bar.setValue(100)
-        self.phase_lbl.setText("Sync complete! Curves available offline.")
-        self.phase_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #ffffff;")
-        self.detail_lbl.setText(f"Successfully cached {new_saved:,} new curves in local SQLite storage.")
+        if self.progress_bar.value() >= 100:
+            self.phase_lbl.setText("Sync complete! Curves available offline.")
+            self.phase_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #ffffff;")
+            self.detail_lbl.setText(f"Successfully cached {new_saved:,} new curves in local SQLite storage.")
+        else:
+            self.phase_lbl.setText("Sync stopped.")
+            self.phase_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #a1a1aa;")
+            self.detail_lbl.setText("Sync was cancelled. Cached curves were preserved.")
         self._refresh_stats()
+        if self.main_win and hasattr(self.main_win, "_update_offline_db_badge"):
+            self.main_win._update_offline_db_badge()
 
     def _on_error(self, err: str) -> None:
         self.start_btn.setText("Start Sync")
@@ -4021,7 +4008,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._device_hotplug_timer.start()
 
         # Undo / Redo Parameter History Stack (DAW-grade parameter undo)
-        self._undo_stack: List[Tuple[float, List[Dict[str, Any]]]] = []
+        self._undo_stack: deque[Tuple[float, List[Dict[str, Any]]]] = deque(maxlen=50)
         self._redo_stack: List[Tuple[float, List[Dict[str, Any]]]] = []
         self._last_state: Optional[Tuple[float, List[Dict[str, Any]]]] = None
         self._is_undoing_redoing = False
@@ -4068,13 +4055,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._device_hotplug_timer.stop()
         self._db_switch_timer.stop()
         if self._db_worker and self._db_worker.isRunning():
-            self._db_worker.terminate()
+            self._db_worker.requestInterruption()
             self._db_worker.wait(400)
         if self._curve_worker and self._curve_worker.isRunning():
-            self._curve_worker.terminate()
+            self._curve_worker.requestInterruption()
             self._curve_worker.wait(400)
         if self._autoeq_worker and self._autoeq_worker.isRunning():
-            self._autoeq_worker.terminate()
+            self._autoeq_worker.cancel()
             self._autoeq_worker.wait(400)
         if self.offline_sync_worker and self.offline_sync_worker.isRunning():
             self.offline_sync_worker.cancel()
@@ -5078,8 +5065,6 @@ class MainWindow(QtWidgets.QMainWindow):
         state = self._last_state if self._last_state is not None else self._get_current_state()
         if not self._undo_stack or self._undo_stack[-1] != state:
             self._undo_stack.append(state)
-            if len(self._undo_stack) > 50:
-                self._undo_stack.pop(0)
             self._redo_stack.clear()
 
     def _commit_state(self) -> None:
@@ -5367,6 +5352,102 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return (([], []), ([], []), ([], []))
 
+    def _async_fetch_preset_reference_curves(self, preset_name: str, autoeq_meta: Dict[str, Any], bands: List[EQBand]) -> None:
+        """Fetches missing preset reference curves asynchronously to avoid blocking the UI thread."""
+        m_file = autoeq_meta.get("model_file", "")
+        t_file = autoeq_meta.get("target_file", "")
+        t_name = autoeq_meta.get("target_name", "")
+        chan = autoeq_meta.get("channel_mode", "avg")
+        m_name = autoeq_meta.get("model_name", "")
+        t_mode = autoeq_meta.get("target_mode", "target_curve")
+        base_u = autoeq_meta.get("base_url", "")
+
+        model = (
+            SquigModel(
+                brand="",
+                name=m_name or m_file,
+                full_name=m_name or m_file,
+                file_name=m_file,
+                display_name=m_name or m_file,
+            )
+            if m_file
+            else None
+        )
+        target_mode_int = 0
+        target = None
+        target_iem = None
+        target_iem_chan = "avg"
+        target_profile_name = ""
+
+        if t_mode == "iem_tuning" or autoeq_meta.get("target_iem_file"):
+            target_mode_int = 1
+            t_iem_file = autoeq_meta.get("target_iem_file", "")
+            t_iem_name = autoeq_meta.get("target_iem_name", "")
+            target_iem_chan = autoeq_meta.get("target_iem_channel", "avg")
+            t_iem_base = autoeq_meta.get("target_iem_base_url") or base_u
+            target_iem = (
+                SquigModel(
+                    brand="",
+                    name=t_iem_name or t_iem_file,
+                    full_name=t_iem_name or t_iem_file,
+                    file_name=t_iem_file,
+                    display_name=t_iem_name or t_iem_file,
+                )
+                if t_iem_file
+                else None
+            )
+            if target_iem:
+                target_iem.base_url = t_iem_base
+        elif t_mode == "resultant_profile" or autoeq_meta.get("target_profile_name"):
+            target_mode_int = 2
+            target_profile_name = autoeq_meta.get("target_profile_name", "")
+        else:
+            target_mode_int = 0
+            if t_file:
+                target = SquigTarget(name=t_name or t_file, file_name=t_file)
+
+        if self._curve_worker and self._curve_worker.isRunning():
+            self._curve_worker.requestInterruption()
+            self._curve_worker.wait(200)
+
+        worker = CurveFetchWorker(
+            client=self.squig_client,
+            base_url=base_u,
+            model=model,
+            target_mode=target_mode_int,
+            target=target,
+            target_iem_model=target_iem,
+            target_iem_chan=target_iem_chan,
+            target_profile_name=target_profile_name,
+            preset_manager=self.preset_manager,
+            sample_rate=self.sample_rate,
+            channel_mode=chan,
+            parent=self,
+        )
+
+        def _on_loaded(meas_data: Tuple, target_data: Tuple) -> None:
+            if self.preset_manager.active_preset_name != preset_name:
+                return
+            mf, ms = meas_data
+            tf, ts = target_data
+            if mf or tf:
+                self._autoeq_meas_raw = (mf, ms)
+                self._autoeq_target_raw = (tf, ts)
+                dm, dt, dr = self._compute_normalized_display_curves(mf, ms, tf, ts, bands)
+                if dm[0]:
+                    self._disp_meas_freqs = np.asarray(dm[0], dtype=np.float64)
+                    self._disp_meas_spls = np.asarray(dm[1], dtype=np.float64)
+                    self.eq_plot.set_measurement_data(dm[0], dm[1], m_name or "Measurement")
+                if dt[0]:
+                    self.eq_plot.set_target_data(dt[0], dt[1], t_name or "Target")
+                if dr[0]:
+                    self.eq_plot.set_resultant_data(dr[0], dr[1], f"{m_name or 'Resultant'} + EQ")
+                self.eq_plot.set_overlays_visible(True, True)
+
+        worker.sigCurvesLoaded.connect(_on_loaded)
+        self._curve_worker = worker
+        worker.start()
+
     def _on_preset_loaded(self, preset_name: str, animate: bool = True) -> None:
         self._undo_stack.clear()
         self._redo_stack.clear()
@@ -5405,43 +5486,20 @@ class MainWindow(QtWidgets.QMainWindow):
             t_mode = autoeq_meta.get("target_mode", "target_curve")
 
             # Query offline database synchronously (ultra-fast SQLite lookup)
-            from offline_db import get_offline_db
             off_db = get_offline_db()
             m_res = off_db.get_measurement(db_id, m_file, chan) if m_file else None
-            if not m_res and m_file:
-                base_u = autoeq_meta.get("base_url")
-                if base_u:
-                    try:
-                        temp_m = SquigModel(
-                            brand="",
-                            name=m_name or m_file,
-                            full_name=m_name or m_file,
-                            file_name=m_file,
-                            display_name=m_name or m_file,
-                        )
-                        m_res = self.squig_client.fetch_iem_measurement(base_u, temp_m, chan)
-                    except Exception:
-                        m_res = None
+            needs_network_fetch = False
+            if not m_res and m_file and autoeq_meta.get("base_url"):
+                needs_network_fetch = True
 
             t_res = None
             if t_mode == "iem_tuning" or autoeq_meta.get("target_iem_file"):
                 t_iem_file = autoeq_meta.get("target_iem_file", "")
                 t_iem_name = autoeq_meta.get("target_iem_name", "")
                 t_iem_chan = autoeq_meta.get("target_iem_channel", "avg")
-                t_iem_base = autoeq_meta.get("target_iem_base_url") or autoeq_meta.get("base_url", "")
                 t_res = off_db.get_measurement(db_id, t_iem_file, t_iem_chan) if t_iem_file else None
-                if not t_res and t_iem_file and t_iem_base:
-                    try:
-                        temp_m = SquigModel(
-                            brand="",
-                            name=t_iem_name or t_iem_file,
-                            full_name=t_iem_name or t_iem_file,
-                            file_name=t_iem_file,
-                            display_name=t_iem_name or t_iem_file,
-                        )
-                        t_res = self.squig_client.fetch_iem_measurement(t_iem_base, temp_m, t_iem_chan)
-                    except Exception:
-                        t_res = None
+                if not t_res and t_iem_file and (autoeq_meta.get("target_iem_base_url") or autoeq_meta.get("base_url")):
+                    needs_network_fetch = True
                 t_name = f"{t_iem_name or t_iem_file} (Target)"
             elif t_mode == "resultant_profile" or autoeq_meta.get("target_profile_name"):
                 target_p_name = autoeq_meta.get("target_profile_name", "")
@@ -5449,15 +5507,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 t_name = f"{target_p_name} (Resultant)"
             else:
                 t_res = off_db.get_target(db_id, t_file, t_name) if t_file else None
-                if not t_res and t_file:
-                    base_u = autoeq_meta.get("base_url")
-                    if base_u:
-                        try:
-                            t_res = self.squig_client.fetch_target_curve(
-                                base_u, SquigTarget(name=t_name or t_file, file_name=t_file)
-                            )
-                        except Exception:
-                            t_res = None
+                if not t_res and t_file and autoeq_meta.get("base_url"):
+                    needs_network_fetch = True
+
+            if needs_network_fetch:
+                self._async_fetch_preset_reference_curves(preset_name, autoeq_meta, bands)
 
             if m_res or t_res:
                 mf, ms = m_res if m_res else ([], [])
@@ -5485,15 +5539,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 t2_file = autoeq_meta.get("target2_file", "")
                 t2_name = autoeq_meta.get("target2_name", "")
                 t2_res = off_db.get_target(db_id, t2_file, t2_name) if t2_file else None
-                if not t2_res and t2_file:
-                    base_u = autoeq_meta.get("base_url")
-                    if base_u:
-                        try:
-                            t2_res = self.squig_client.fetch_target_curve(
-                                base_u, SquigTarget(name=t2_name or t2_file, file_name=t2_file)
-                            )
-                        except Exception:
-                            t2_res = None
 
                 if t2_res and len(t2_res[0]) > 0 and len(t2_res[1]) > 0:
                     t2_f, t2_s = t2_res

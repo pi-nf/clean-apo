@@ -12,6 +12,7 @@ import zlib
 import struct
 import sqlite3
 import threading
+import numpy as np
 import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
@@ -43,7 +44,7 @@ class OfflineCurveDatabase:
         """Returns the thread-local SQLite connection, initialized once per thread."""
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             self._local.conn = conn
@@ -95,7 +96,7 @@ class OfflineCurveDatabase:
         n = min(len(freqs), len(spls))
         if n == 0:
             return b""
-        raw = struct.pack(f"{n}f", *freqs[:n]) + struct.pack(f"{n}f", *spls[:n])
+        raw = np.asarray(freqs[:n], dtype=np.float32).tobytes() + np.asarray(spls[:n], dtype=np.float32).tobytes()
         return zlib.compress(raw, level=6)
 
     @staticmethod
@@ -107,9 +108,8 @@ class OfflineCurveDatabase:
             raw = zlib.decompress(blob)
             total_floats = len(raw) // 4
             n = total_floats // 2
-            f_vals = list(struct.unpack(f"{n}f", raw[:n * 4]))
-            s_vals = list(struct.unpack(f"{n}f", raw[n * 4:n * 8]))
-            return f_vals, s_vals
+            arr = np.frombuffer(raw[:n * 8], dtype=np.float32)
+            return arr[:n].tolist(), arr[n:2 * n].tolist()
         except Exception:
             return [], []
 
@@ -311,17 +311,24 @@ class OfflineCurveDatabase:
             with conn:
                 conn.execute("DELETE FROM measurements")
                 conn.execute("DELETE FROM targets")
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            except Exception:
+                pass
             conn.execute("VACUUM")
 
 
 # Global singleton instance
 _GLOBAL_OFFLINE_DB: Optional[OfflineCurveDatabase] = None
+_DB_INIT_LOCK = threading.Lock()
 
 
 def get_offline_db() -> OfflineCurveDatabase:
     global _GLOBAL_OFFLINE_DB
     if _GLOBAL_OFFLINE_DB is None:
-        _GLOBAL_OFFLINE_DB = OfflineCurveDatabase()
+        with _DB_INIT_LOCK:
+            if _GLOBAL_OFFLINE_DB is None:
+                _GLOBAL_OFFLINE_DB = OfflineCurveDatabase()
     return _GLOBAL_OFFLINE_DB
 
 

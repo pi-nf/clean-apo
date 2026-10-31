@@ -13,6 +13,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
+import numpy as np
 from offline_db import get_offline_db
 
 try:
@@ -207,6 +208,9 @@ class SquigModel:
     variant: str = ""
     review_score: str = ""
     price: str = ""
+    base_url: Optional[str] = None
+    provider_name: Optional[str] = None
+    rig: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -218,6 +222,9 @@ class SquigModel:
             "variant": self.variant,
             "review_score": self.review_score,
             "price": self.price,
+            "base_url": self.base_url,
+            "provider_name": self.provider_name,
+            "rig": self.rig,
         }
 
 
@@ -256,6 +263,7 @@ class SquigClient:
         self._user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CleanAPO/1.0"
         self._in_memory_indices: Dict[str, Tuple[List[SquigModel], List[SquigTarget], str]] = {}
         self._global_catalog: Optional[List[Dict[str, Any]]] = None
+        self._db_id_cache: Dict[str, str] = {}
 
         if HAS_REQUESTS:
             self.session = requests.Session()
@@ -283,32 +291,30 @@ class SquigClient:
 
     def _get_db_id(self, base_url: str) -> str:
         clean_url = base_url.rstrip("/")
+        if clean_url in self._db_id_cache:
+            return self._db_id_cache[clean_url]
+        db_id = None
         for d in DEFAULT_DATABASES:
             if d.get("base_url", "").rstrip("/") == clean_url:
-                return d.get("id", "default")
-        cat = self.get_global_catalog()
-        for c in cat:
-            if c.get("base_url", "").rstrip("/") == clean_url:
-                return c.get("username") or c.get("provider") or "default"
-        parsed = urllib.parse.urlparse(base_url)
-        return re.sub(r"[^a-zA-Z0-9_]", "_", parsed.netloc + parsed.path).strip("_") or "default"
+                db_id = d.get("id", "default")
+                break
+        if not db_id:
+            cat = self.get_global_catalog()
+            for c in cat:
+                if c.get("base_url", "").rstrip("/") == clean_url:
+                    db_id = c.get("username") or c.get("provider") or "default"
+                    break
+        if not db_id:
+            parsed = urllib.parse.urlparse(base_url)
+            db_id = re.sub(r"[^a-zA-Z0-9_]", "_", parsed.netloc + parsed.path).strip("_") or "default"
+        self._db_id_cache[clean_url] = db_id
+        return db_id
 
     def _http_get_text(self, url: str, timeout: int = 8) -> Tuple[int, str]:
         """Performs HTTP GET with requests session (or urllib fallback), returning (status_code, text)."""
         if HAS_REQUESTS and self.session is not None:
             try:
                 resp = self.session.get(
-                    url,
-                    headers={"User-Agent": self._user_agent},
-                    timeout=timeout,
-                )
-                resp.encoding = "utf-8"
-                return resp.status_code, resp.text
-            except Exception as e:
-                return 0, str(e)
-        elif HAS_REQUESTS:
-            try:
-                resp = requests.get(
                     url,
                     headers={"User-Agent": self._user_agent},
                     timeout=timeout,
@@ -995,6 +1001,7 @@ class SquigClient:
         for d in data_dirs:
             # Try Left
             if not text_l and channel_mode in ("avg", "L"):
+                res: Optional[str] = None
                 for lf in l_files:
                     res = self.fetch_curve_file(base_url, f"{d}{lf}", force_refresh)
                     if res == "__FORBIDDEN__":
@@ -1008,6 +1015,7 @@ class SquigClient:
 
             # Try Right
             if not text_r and channel_mode in ("avg", "R"):
+                res: Optional[str] = None
                 for rf in r_files:
                     res = self.fetch_curve_file(base_url, f"{d}{rf}", force_refresh)
                     if res == "__FORBIDDEN__":
@@ -1021,6 +1029,7 @@ class SquigClient:
 
             # Try Single (only if L or R not found)
             if not text_single and not (text_l or text_r):
+                res: Optional[str] = None
                 for sf in s_files:
                     res = self.fetch_curve_file(base_url, f"{d}{sf}", force_refresh)
                     if res == "__FORBIDDEN__":
@@ -1047,7 +1056,6 @@ class SquigClient:
         elif channel_mode == "R" and freqs_r:
             ret_f, ret_s = freqs_r, spls_r
         elif channel_mode == "avg" and freqs_l and freqs_r:
-            import numpy as np
             common_f = freqs_l if len(freqs_l) >= len(freqs_r) else freqs_r
             s_l_interp = np.interp(common_f, freqs_l, spls_l)
             s_r_interp = np.interp(common_f, freqs_r, spls_r)

@@ -100,20 +100,15 @@ def optimize_parametric_eq(
     # 5. Frequency Weighting
     # Weight mid-frequencies (100 Hz to 6 kHz) more heavily than high treble (>8 kHz)
     # Restrict aggressive corrections above 10 kHz due to 711 coupler insertion resonances
-    weights = np.ones_like(f_grid)
-    for idx, f in enumerate(f_grid):
-        if f < min_freq:
-            weights[idx] = 0.05
-        elif min_freq <= f < 100.0:
-            weights[idx] = 0.85
-        elif 100.0 <= f <= 6000.0:
-            weights[idx] = 1.6
-        elif 6000.0 < f <= max_freq:
-            weights[idx] = 1.0
-        elif max_freq < f <= 10000.0:
-            weights[idx] = 0.35
-        else:
-            weights[idx] = 0.02
+    conds = [
+        f_grid < min_freq,
+        (f_grid >= min_freq) & (f_grid < 100.0),
+        (f_grid >= 100.0) & (f_grid <= 6000.0),
+        (f_grid > 6000.0) & (f_grid <= max_freq),
+        (f_grid > max_freq) & (f_grid <= 10000.0),
+    ]
+    choices = [0.05, 0.85, 1.6, 1.0, 0.35]
+    weights = np.select(conds, choices, default=0.02)
 
     # 6. Precompute Biquad Complex Constants for Fast Vectorized Evaluation
     w = 2.0 * np.pi * f_grid / fs
@@ -131,12 +126,15 @@ def optimize_parametric_eq(
             b0, b1, b2, a1, a2 = biquad_coeffs(ftype, f0, g, q, fs)
             num = b0 + b1 * z1 + b2 * z2
             den = 1.0 + a1 * z1 + a2 * z2
-            total += 20.0 * np.log10(np.abs(num / den) + 1e-12)
+            total += 20.0 * np.log10(np.maximum(np.abs(num / den), 1e-12))
         return total
 
     # 7. Initial Parameter Estimates & Bounds
     # Seed peak filters on dominant resonance peaks/dips using find_peaks on |error_curve|
-    num_peak_bands = (num_bands - 1) if (use_bass_shelf and num_bands > 1) else (0 if (use_bass_shelf and num_bands == 1) else num_bands)
+    if use_bass_shelf:
+        num_peak_bands = max(0, num_bands - 1)
+    else:
+        num_peak_bands = num_bands
     selected_peak_freqs: List[float] = []
 
     if num_peak_bands > 0:
@@ -326,8 +324,7 @@ class AutoEQWorker(QtCore.QThread):
 
     def cancel(self) -> None:
         self.requestInterruption()
-        self.terminate()
-        self.wait(300)
+        self.wait(500)
 
     def run(self) -> None:
         if self.isInterruptionRequested():

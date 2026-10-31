@@ -8,6 +8,7 @@ import sys
 import re
 import json
 import time
+import copy
 import shutil
 import configparser
 from typing import Dict, List, Optional, Tuple, Any
@@ -170,7 +171,6 @@ def ensure_apo_root_config_include(apo_file_path: str) -> bool:
                 ok, _ = grant_apo_directory_permissions(os.path.dirname(config_txt))
                 if ok:
                     try:
-                        time.sleep(0.5)
                         with open(config_txt, "w", encoding="utf-8") as f:
                             f.write(f"# Equalizer APO Main Configuration\n{directive}\n")
                         return True
@@ -203,7 +203,6 @@ def ensure_apo_root_config_include(apo_file_path: str) -> bool:
                 ok, _ = grant_apo_directory_permissions(os.path.dirname(config_txt))
                 if ok:
                     try:
-                        time.sleep(0.5)
                         with open(config_txt, "w", encoding="utf-8") as f:
                             f.write("\n".join(cleaned_lines) + "\n")
                         return True
@@ -677,12 +676,12 @@ class PresetManager(QtCore.QObject):
                     if isinstance(loaded, dict) and loaded:
                         self.presets = loaded
                     else:
-                        self.presets = json.loads(json.dumps(FACTORY_PRESETS))
+                        self.presets = copy.deepcopy(FACTORY_PRESETS)
             except Exception as e:
                 print(f"[PresetManager] Error reading presets JSON: {e}")
-                self.presets = json.loads(json.dumps(FACTORY_PRESETS))
+                self.presets = copy.deepcopy(FACTORY_PRESETS)
         else:
-            self.presets = json.loads(json.dumps(FACTORY_PRESETS))
+            self.presets = copy.deepcopy(FACTORY_PRESETS)
             self.save_presets()
 
         if self.active_preset_name not in self.presets:
@@ -774,7 +773,6 @@ class PresetManager(QtCore.QObject):
         else:
             self.presets[name].pop("autoeq", None)
         self.save_presets()
-        self.save_settings()
         self.sigPresetsListChanged.emit()
         return True
 

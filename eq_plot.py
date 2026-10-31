@@ -805,6 +805,9 @@ class EQPlotWidget(pg.PlotWidget):
     def set_eq_bypassed(self, bypassed: bool) -> None:
         self.is_bypassed = bypassed
         self._bypass_animation.stop()
+        self._cached_bypass_active_response = compute_composite_response(
+            self.bands, self.freq_points, preamp_db=self.preamp_db, fs=self.sample_rate
+        )
         start_factor = self._eq_active_factor
         end_factor = 0.0 if bypassed else 1.0
         self._bypass_animation.setStartValue(start_factor)
@@ -816,10 +819,13 @@ class EQPlotWidget(pg.PlotWidget):
         factor = self._eq_active_factor
 
         # Interpolate composite EQ curve towards 0 dB flat line
-        active_response = compute_composite_response(
-            self.bands, self.freq_points, preamp_db=self.preamp_db, fs=self.sample_rate
-        )
-        current_response = factor * active_response + (1.0 - factor) * 0.0
+        active_response = getattr(self, "_cached_bypass_active_response", None)
+        if active_response is None:
+            active_response = compute_composite_response(
+                self.bands, self.freq_points, preamp_db=self.preamp_db, fs=self.sample_rate
+            )
+            self._cached_bypass_active_response = active_response
+        current_response = factor * active_response
         self.eq_curve.setData(self.x_log_points, current_response)
 
         # Interpolate curve pen (white solid -> dim grey dashed)
@@ -1333,8 +1339,6 @@ class EQPlotWidget(pg.PlotWidget):
 
         self.recompute_composite_curve()
 
-        self.recompute_composite_curve()
-
     def update_band_params(
         self,
         band_id: int,
@@ -1833,22 +1837,6 @@ class EQPlotWidget(pg.PlotWidget):
 
         reset_act = plot_opts_menu.addAction("Reset View (20 Hz - 20 kHz, -20 to +20 dB)")
         reset_act.triggered.connect(self.reset_default_view)
-
-        # Direct quick toggles on the main menu as well:
-        qx_maj = menu.addAction("Show Frequency (X) Grid")
-        qx_maj.setCheckable(True)
-        qx_maj.setChecked(self.grid_item.show_x_major)
-        qx_maj.triggered.connect(self._toggle_x_major_grid)
-
-        qx_min = menu.addAction("Show Intermediate Grid (3k, 4k, etc.)")
-        qx_min.setCheckable(True)
-        qx_min.setChecked(self.grid_item.show_x_minor)
-        qx_min.triggered.connect(self._toggle_x_minor_grid)
-
-        qy_act = menu.addAction("Show Decibel (Y) Grid")
-        qy_act.setCheckable(True)
-        qy_act.setChecked(self.grid_item.show_y)
-        qy_act.triggered.connect(self._toggle_y_grid)
 
         menu.addSeparator()
 

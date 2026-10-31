@@ -142,6 +142,26 @@ def biquad_coeffs(
     return b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
 
 
+_Z_CACHE: Dict[Tuple[int, float, float, float], Tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _get_cached_z(freqs: np.ndarray, fs: float) -> Tuple[np.ndarray, np.ndarray]:
+    n = len(freqs)
+    if n == 0:
+        return np.array([], dtype=np.complex128), np.array([], dtype=np.complex128)
+    key = (n, float(fs), float(freqs[0]), float(freqs[-1]))
+    cached = _Z_CACHE.get(key)
+    if cached is None:
+        w = 2.0 * np.pi * freqs / fs
+        z1 = np.exp(-1j * w)
+        z2 = np.exp(-2j * w)
+        cached = (z1, z2)
+        if len(_Z_CACHE) > 32:
+            _Z_CACHE.clear()
+        _Z_CACHE[key] = cached
+    return cached
+
+
 def compute_filter_response(
     filter_type: FilterType | str,
     f0: float,
@@ -154,14 +174,12 @@ def compute_filter_response(
     Computes magnitude response in dB across the given frequency array.
     """
     b0, b1, b2, a1, a2 = biquad_coeffs(filter_type, f0, gain_db, q, fs)
-    w = 2.0 * np.pi * freqs / fs
-    z1 = np.exp(-1j * w)
-    z2 = np.exp(-2j * w)
+    z1, z2 = _get_cached_z(freqs, fs)
 
     num = b0 + b1 * z1 + b2 * z2
     den = 1.0 + a1 * z1 + a2 * z2
     H = num / den
-    return 20.0 * np.log10(np.abs(H) + 1e-12)
+    return 20.0 * np.log10(np.maximum(np.abs(H), 1e-12))
 
 
 def compute_composite_response(
@@ -175,9 +193,7 @@ def compute_composite_response(
     Vectorized and optimized for high-speed 60+ FPS real-time rendering.
     """
     total = np.full(len(freqs), float(preamp_db), dtype=np.float64)
-    w = 2.0 * np.pi * freqs / fs
-    z1 = np.exp(-1j * w)
-    z2 = np.exp(-2j * w)
+    z1, z2 = _get_cached_z(freqs, fs)
 
     for band in bands:
         if not band.enabled:
@@ -188,6 +204,6 @@ def compute_composite_response(
         num = b0 + b1 * z1 + b2 * z2
         den = 1.0 + a1 * z1 + a2 * z2
         H = num / den
-        total += 20.0 * np.log10(np.abs(H) + 1e-12)
+        total += 20.0 * np.log10(np.maximum(np.abs(H), 1e-12))
 
     return total
