@@ -36,46 +36,58 @@ class OfflineCurveDatabase:
         self.db_path = db_path
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._lock = threading.Lock()
+        self._local = threading.local()
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
+        """Returns the thread-local SQLite connection, initialized once per thread."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            self._local.conn = conn
         return conn
+
+    def close(self) -> None:
+        """Closes the current thread's connection if open."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
 
     def _init_db(self) -> None:
         with self._lock:
             conn = self._get_connection()
-            try:
-                with conn:
-                    conn.execute("""
-                        CREATE TABLE IF NOT EXISTS measurements (
-                            db_id TEXT,
-                            model_file TEXT,
-                            channel TEXT,
-                            point_count INTEGER,
-                            data BLOB,
-                            updated_at REAL,
-                            PRIMARY KEY (db_id, model_file, channel)
-                        );
-                    """)
-                    conn.execute("""
-                        CREATE TABLE IF NOT EXISTS targets (
-                            db_id TEXT,
-                            target_file TEXT,
-                            target_name TEXT,
-                            point_count INTEGER,
-                            data BLOB,
-                            updated_at REAL,
-                            PRIMARY KEY (db_id, target_file)
-                        );
-                    """)
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_meas_file ON measurements(model_file);")
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_meas_db ON measurements(db_id);")
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_target_name ON targets(target_name);")
-            finally:
-                conn.close()
+            with conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS measurements (
+                        db_id TEXT,
+                        model_file TEXT,
+                        channel TEXT,
+                        point_count INTEGER,
+                        data BLOB,
+                        updated_at REAL,
+                        PRIMARY KEY (db_id, model_file, channel)
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS targets (
+                        db_id TEXT,
+                        target_file TEXT,
+                        target_name TEXT,
+                        point_count INTEGER,
+                        data BLOB,
+                        updated_at REAL,
+                        PRIMARY KEY (db_id, target_file)
+                    );
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_meas_file ON measurements(model_file);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_meas_db ON measurements(db_id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_target_name ON targets(target_name);")
 
     @staticmethod
     def pack_curve(freqs: List[float], spls: List[float]) -> bytes:
@@ -107,37 +119,34 @@ class OfflineCurveDatabase:
         """Retrieves and unpacks a cached measurement curve."""
         clean_file = model_file.strip()
         conn = self._get_connection()
-        try:
-            cur = conn.cursor()
-            # 1. Exact match by db_id, file, and channel
-            cur.execute(
-                "SELECT data FROM measurements WHERE db_id = ? AND model_file = ? AND channel = ?",
-                (db_id, clean_file, channel)
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                return self.unpack_curve(row[0])
+        cur = conn.cursor()
+        # 1. Exact match by db_id, file, and channel
+        cur.execute(
+            "SELECT data FROM measurements WHERE db_id = ? AND model_file = ? AND channel = ?",
+            (db_id, clean_file, channel)
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return self.unpack_curve(row[0])
 
-            # 2. Fallback to 'avg' if looking for L/R or vice versa
-            cur.execute(
-                "SELECT data FROM measurements WHERE db_id = ? AND model_file = ?",
-                (db_id, clean_file)
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                return self.unpack_curve(row[0])
+        # 2. Fallback to 'avg' if looking for L/R or vice versa
+        cur.execute(
+            "SELECT data FROM measurements WHERE db_id = ? AND model_file = ?",
+            (db_id, clean_file)
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return self.unpack_curve(row[0])
 
-            # 3. Global fallback across any database for this model_file
-            cur.execute(
-                "SELECT data FROM measurements WHERE model_file = ? ORDER BY updated_at DESC LIMIT 1",
-                (clean_file,)
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                return self.unpack_curve(row[0])
-            return None
-        finally:
-            conn.close()
+        # 3. Global fallback across any database for this model_file
+        cur.execute(
+            "SELECT data FROM measurements WHERE model_file = ? ORDER BY updated_at DESC LIMIT 1",
+            (clean_file,)
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return self.unpack_curve(row[0])
+        return None
 
     def save_measurement(
         self, db_id: str, model_file: str, channel: str, freqs: List[float], spls: List[float]
@@ -149,14 +158,11 @@ class OfflineCurveDatabase:
         n = min(len(freqs), len(spls))
         with self._lock:
             conn = self._get_connection()
-            try:
-                with conn:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO measurements (db_id, model_file, channel, point_count, data, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (db_id, model_file.strip(), channel, n, blob, time.time()))
-            finally:
-                conn.close()
+            with conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO measurements (db_id, model_file, channel, point_count, data, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (db_id, model_file.strip(), channel, n, blob, time.time()))
 
     def save_measurements_batch(
         self, items: List[Tuple[str, str, str, List[float], List[float]]]
@@ -177,14 +183,11 @@ class OfflineCurveDatabase:
 
         with self._lock:
             conn = self._get_connection()
-            try:
-                with conn:
-                    conn.executemany("""
-                        INSERT OR REPLACE INTO measurements (db_id, model_file, channel, point_count, data, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, rows)
-            finally:
-                conn.close()
+            with conn:
+                conn.executemany("""
+                    INSERT OR REPLACE INTO measurements (db_id, model_file, channel, point_count, data, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, rows)
 
     def get_target(
         self, db_id: str, target_file: str, target_name: Optional[str] = None
@@ -192,38 +195,35 @@ class OfflineCurveDatabase:
         """Retrieves and unpacks a target curve."""
         clean_file = target_file.strip()
         conn = self._get_connection()
-        try:
-            cur = conn.cursor()
-            # 1. Exact match by db_id and file
+        cur = conn.cursor()
+        # 1. Exact match by db_id and file
+        cur.execute(
+            "SELECT data FROM targets WHERE db_id = ? AND target_file = ?",
+            (db_id, clean_file)
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return self.unpack_curve(row[0])
+
+        # 2. Match by target_name
+        if target_name:
             cur.execute(
-                "SELECT data FROM targets WHERE db_id = ? AND target_file = ?",
-                (db_id, clean_file)
+                "SELECT data FROM targets WHERE target_name = ? ORDER BY updated_at DESC LIMIT 1",
+                (target_name.strip(),)
             )
             row = cur.fetchone()
             if row and row[0]:
                 return self.unpack_curve(row[0])
 
-            # 2. Match by target_name
-            if target_name:
-                cur.execute(
-                    "SELECT data FROM targets WHERE target_name = ? ORDER BY updated_at DESC LIMIT 1",
-                    (target_name.strip(),)
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    return self.unpack_curve(row[0])
-
-            # 3. Global match by target_file across any reviewer
-            cur.execute(
-                "SELECT data FROM targets WHERE target_file = ? ORDER BY updated_at DESC LIMIT 1",
-                (clean_file,)
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                return self.unpack_curve(row[0])
-            return None
-        finally:
-            conn.close()
+        # 3. Global match by target_file across any reviewer
+        cur.execute(
+            "SELECT data FROM targets WHERE target_file = ? ORDER BY updated_at DESC LIMIT 1",
+            (clean_file,)
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return self.unpack_curve(row[0])
+        return None
 
     def save_target(
         self, db_id: str, target_file: str, target_name: str, freqs: List[float], spls: List[float]
@@ -235,14 +235,11 @@ class OfflineCurveDatabase:
         n = min(len(freqs), len(spls))
         with self._lock:
             conn = self._get_connection()
-            try:
-                with conn:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO targets (db_id, target_file, target_name, point_count, data, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (db_id, target_file.strip(), target_name.strip(), n, blob, time.time()))
-            finally:
-                conn.close()
+            with conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO targets (db_id, target_file, target_name, point_count, data, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (db_id, target_file.strip(), target_name.strip(), n, blob, time.time()))
 
     def save_targets_batch(
         self, items: List[Tuple[str, str, str, List[float], List[float]]]
@@ -263,34 +260,25 @@ class OfflineCurveDatabase:
 
         with self._lock:
             conn = self._get_connection()
-            try:
-                with conn:
-                    conn.executemany("""
-                        INSERT OR REPLACE INTO targets (db_id, target_file, target_name, point_count, data, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, rows)
-            finally:
-                conn.close()
+            with conn:
+                conn.executemany("""
+                    INSERT OR REPLACE INTO targets (db_id, target_file, target_name, point_count, data, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, rows)
 
     def get_cached_measurement_keys(self) -> Set[Tuple[str, str]]:
         """Returns set of (db_id, model_file) already present in SQLite."""
         conn = self._get_connection()
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT DISTINCT db_id, model_file FROM measurements")
-            return set(cur.fetchall())
-        finally:
-            conn.close()
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT db_id, model_file FROM measurements")
+        return set(cur.fetchall())
 
     def get_cached_target_keys(self) -> Set[Tuple[str, str]]:
         """Returns set of (db_id, target_file) already present in SQLite."""
         conn = self._get_connection()
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT db_id, target_file FROM targets")
-            return set(cur.fetchall())
-        finally:
-            conn.close()
+        cur = conn.cursor()
+        cur.execute("SELECT db_id, target_file FROM targets")
+        return set(cur.fetchall())
 
     def get_stats(self) -> Dict[str, Any]:
         """Returns statistical metrics on the offline SQLite library."""
@@ -298,40 +286,32 @@ class OfflineCurveDatabase:
         size_mb = size_bytes / (1024 * 1024)
 
         conn = self._get_connection()
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM measurements")
-            meas_count = cur.fetchone()[0]
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM measurements")
+        meas_count = cur.fetchone()[0]
 
-            cur.execute("SELECT COUNT(*) FROM targets")
-            target_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM targets")
+        target_count = cur.fetchone()[0]
 
-            cur.execute("SELECT COUNT(DISTINCT db_id) FROM measurements")
-            db_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(DISTINCT db_id) FROM measurements")
+        db_count = cur.fetchone()[0]
 
-            return {
-                "measurements": meas_count,
-                "targets": target_count,
-                "databases": db_count,
-                "size_mb": round(size_mb, 2),
-                "db_path": self.db_path,
-            }
-        finally:
-            conn.close()
+        return {
+            "measurements": meas_count,
+            "targets": target_count,
+            "databases": db_count,
+            "size_mb": round(size_mb, 2),
+            "db_path": self.db_path,
+        }
 
     def clear_all(self) -> None:
         """Clears all cached measurements and targets and vacuums the database to reclaim disk space."""
         with self._lock:
             conn = self._get_connection()
-            try:
-                cur = conn.cursor()
-                cur.execute("DELETE FROM measurements")
-                cur.execute("DELETE FROM targets")
-                conn.commit()
-                cur.execute("VACUUM")
-                conn.commit()
-            finally:
-                conn.close()
+            with conn:
+                conn.execute("DELETE FROM measurements")
+                conn.execute("DELETE FROM targets")
+            conn.execute("VACUUM")
 
 
 # Global singleton instance

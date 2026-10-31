@@ -10,12 +10,32 @@ added_files = [
     ('presets.json', '.'),
 ]
 
+# Check for EqualizerAPO-x64-1.4.2.exe (or any EqualizerAPO*.exe) in assets/, installers/, and the repository root
+base_dir = os.path.abspath(os.path.dirname(SPEC)) if 'SPEC' in locals() else os.path.abspath('.')
+
+installer_search_dirs = [
+    (os.path.join(base_dir, 'assets'), 'assets'),
+    (os.path.join(base_dir, 'installers'), 'installers'),
+    (base_dir, 'assets'),
+]
+
+for s_dir, target_dir in installer_search_dirs:
+    if os.path.isdir(s_dir):
+        for fname in os.listdir(s_dir):
+            if fname.lower().startswith("equalizerapo") and fname.lower().endswith(".exe"):
+                src_path = os.path.join(s_dir, fname)
+                entry = (src_path, target_dir)
+                if entry not in added_files and (target_dir, target_dir) not in added_files:
+                    added_files.append(entry)
+                break
+
 hidden_imports = [
     'numpy',
     'scipy',
     'scipy.optimize',
     'scipy.interpolate',
     'scipy.special',
+    'scipy.signal',
     'sounddevice',
     'pyaudiowpatch',
     'pyqtgraph',

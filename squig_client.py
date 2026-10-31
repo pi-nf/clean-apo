@@ -9,6 +9,7 @@ import sys
 import os
 import re
 import json
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
@@ -832,16 +833,29 @@ class SquigClient:
                 pass
 
         url = base_url + urllib.parse.quote(file_path_relative)
-        code, text = self._http_get_text(url, timeout=2)
-        if code == 403:
-            return "__FORBIDDEN__"
-        if code == 200 and len(text) > 20:
-            try:
-                with open(cache_path, "w", encoding="utf-8") as f:
-                    f.write(text)
-            except Exception:
-                pass
-            return text
+        max_retries = 2
+        backoffs = [0.5, 1.0]
+
+        for attempt in range(max_retries + 1):
+            code, text = self._http_get_text(url, timeout=8)
+            if code == 403:
+                return "__FORBIDDEN__"
+            if code == 200 and len(text) > 20:
+                try:
+                    with open(cache_path, "w", encoding="utf-8") as f:
+                        f.write(text)
+                except Exception:
+                    pass
+                return text
+
+            is_transient = (
+                code in (429, 502, 503)
+                or (code == 0 and any(err in text.lower() for err in ("reset", "connection", "timeout", "timed out", "forcibly closed")))
+            )
+            if is_transient and attempt < max_retries:
+                time.sleep(backoffs[attempt])
+                continue
+            break
 
         return None
 

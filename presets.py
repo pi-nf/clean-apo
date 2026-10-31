@@ -58,18 +58,74 @@ def clean_apo_device_name(dev_name: Optional[str]) -> str:
     name = dev_name.strip()
     if not name or "auto-follow" in name.lower() or "default" in name.lower() or name.lower() == "all":
         return "all"
-    # Remove (Loopback), [Loopback], (WASAPI), etc.
+
+    # 1. Remove (Loopback), [Loopback], (WASAPI), and quotes
     name = re.sub(r"\s*[\(\[]\s*(?:Loopback|WASAPI)\s*[\)\]]", "", name, flags=re.IGNORECASE).strip()
     name = name.strip('"\'')
-    if not name or "auto-follow" in name.lower() or "default" in name.lower():
+    if not name or "auto-follow" in name.lower() or "default" in name.lower() or name.lower() == "all":
         return "all"
-    # If formatted as "Speakers (2- FiiO BTR5)", extract inside parentheses "FiiO BTR5"
-    m = re.search(r"\((?:[0-9]+-\s*)?([^\)]+)\)", name)
-    if m:
-        sub = m.group(1).strip()
-        if sub and "loopback" not in sub.lower():
-            return sub
-    return name
+
+    # 2. Strip Windows endpoint hardware prefix numbering like "1- ", "2- " from the start of the name or within leading brackets
+    name = re.sub(r"^[0-9]+-\s*", "", name)
+    name = re.sub(r"([\(\[])\s*[0-9]+-\s*", r"\1", name)
+
+    # 3. Preserve the full friendly device name without truncating at inner closing parentheses
+    return name.strip()
+
+
+def can_write_to_path(path: str) -> bool:
+    """Checks if the current process has write permissions for the specified file path or its parent directory."""
+    if not path:
+        return False
+    try:
+        if os.path.exists(path):
+            if os.path.isdir(path):
+                test_file = os.path.join(path, f".clean_apo_perm_{os.getpid()}.tmp")
+                with open(test_file, "w") as f:
+                    f.write("test")
+                os.remove(test_file)
+                return True
+            else:
+                with open(path, "a", encoding="utf-8"):
+                    pass
+                return True
+        else:
+            folder = os.path.dirname(path)
+            if not folder:
+                folder = "."
+            os.makedirs(folder, exist_ok=True)
+            test_file = os.path.join(folder, f".clean_apo_perm_{os.getpid()}.tmp")
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            return True
+    except Exception:
+        return False
+
+
+def grant_apo_directory_permissions(cfg_dir: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Elevates via UAC to grant standard user (Users group) Modify permissions
+    to the Equalizer APO config directory using Windows icacls.
+    """
+    if not cfg_dir:
+        cfg_dir = get_apo_config_dir() or r"C:\Program Files\EqualizerAPO\config"
+    if not os.path.isdir(cfg_dir):
+        return False, "Equalizer APO config directory does not exist."
+    try:
+        import ctypes
+        # *S-1-5-32-545 is the Builtin\Users SID (locale-independent across all Windows languages)
+        cmd = f'/c icacls "{cfg_dir}" /grant *S-1-5-32-545:(OI)(CI)M /T'
+        res = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", "cmd.exe", cmd, None, 0
+        )
+        if res > 32:
+            return True, "Permissions granted successfully via UAC."
+        elif res == 5:
+            return False, "UAC elevation was cancelled by user."
+        return False, f"Elevation failed (Error code {res})."
+    except Exception as e:
+        return False, f"Failed granting permissions: {e}"
 
 
 def ensure_apo_root_config_include(apo_file_path: str) -> bool:
@@ -77,33 +133,49 @@ def ensure_apo_root_config_include(apo_file_path: str) -> bool:
     Ensures Equalizer APO's main config.txt includes the target APO file.
     Creates config.txt if it does not exist yet.
     Guarantees proper newline separation and cleans up legacy peqdb directives.
+    Supports relative include (if in same config dir) or absolute include (e.g. AppData path).
     Returns True if config.txt contains the include directive.
     """
     try:
         target_dir = os.path.dirname(apo_file_path)
-        config_txt = os.path.join(target_dir, "config.txt")
-        if not os.path.exists(config_txt):
+        config_txt = os.path.join(target_dir, "config.txt") if target_dir else ""
+        if not (config_txt and os.path.exists(config_txt)):
             cfg_dir = get_apo_config_dir()
             if cfg_dir and os.path.isdir(cfg_dir):
                 config_txt = os.path.join(cfg_dir, "config.txt")
-            elif os.path.isdir(target_dir):
-                config_txt = os.path.join(target_dir, "config.txt")
             elif os.path.isdir(r"C:\Program Files\EqualizerAPO\config"):
                 config_txt = r"C:\Program Files\EqualizerAPO\config\config.txt"
+            elif target_dir and os.path.isdir(target_dir):
+                config_txt = os.path.join(target_dir, "config.txt")
             else:
                 return False
 
+        cfg_folder = os.path.normcase(os.path.abspath(os.path.dirname(config_txt)))
+        apo_folder = os.path.normcase(os.path.abspath(os.path.dirname(apo_file_path)))
         base_name = os.path.basename(apo_file_path)
+
+        if cfg_folder == apo_folder:
+            directive = f"Include: {base_name}"
+        else:
+            directive = f"Include: {os.path.abspath(apo_file_path)}"
 
         # If config.txt does not exist, create it with include directive
         if not os.path.exists(config_txt):
             try:
                 os.makedirs(os.path.dirname(config_txt), exist_ok=True)
                 with open(config_txt, "w", encoding="utf-8") as f:
-                    f.write(f"# Equalizer APO Main Configuration\nInclude: {base_name}\n")
+                    f.write(f"# Equalizer APO Main Configuration\n{directive}\n")
                 return True
-            except Exception as e:
-                print(f"[PresetManager] Notice: Could not create config.txt: {e}")
+            except (PermissionError, OSError):
+                ok, _ = grant_apo_directory_permissions(os.path.dirname(config_txt))
+                if ok:
+                    try:
+                        time.sleep(0.5)
+                        with open(config_txt, "w", encoding="utf-8") as f:
+                            f.write(f"# Equalizer APO Main Configuration\n{directive}\n")
+                        return True
+                    except Exception:
+                        pass
                 return False
 
         with open(config_txt, "r", encoding="utf-8", errors="replace") as f:
@@ -118,14 +190,26 @@ def ensure_apo_root_config_include(apo_file_path: str) -> bool:
                 continue
             cleaned_lines.append(line)
 
-        directive = f"Include: {base_name}"
-        if directive not in cleaned_lines:
+        # Check case-insensitive match for the directive
+        if not any(directive.lower() == line.lower() for line in cleaned_lines):
             cleaned_lines.append(directive)
             changed = True
 
         if changed:
-            with open(config_txt, "w", encoding="utf-8") as f:
-                f.write("\n".join(cleaned_lines) + "\n")
+            try:
+                with open(config_txt, "w", encoding="utf-8") as f:
+                    f.write("\n".join(cleaned_lines) + "\n")
+            except (PermissionError, OSError):
+                ok, _ = grant_apo_directory_permissions(os.path.dirname(config_txt))
+                if ok:
+                    try:
+                        time.sleep(0.5)
+                        with open(config_txt, "w", encoding="utf-8") as f:
+                            f.write("\n".join(cleaned_lines) + "\n")
+                        return True
+                    except Exception:
+                        pass
+                return False
         return True
     except Exception as e:
         print(f"[PresetManager] Notice: Could not update config.txt: {e}")
@@ -377,6 +461,59 @@ def launch_apo_configurator(config_path: Optional[str] = None) -> Tuple[bool, st
             os.environ["PYTHONPATH"] = orig_pythonpath
         else:
             os.environ.pop("PYTHONPATH", None)
+
+
+def create_windows_shortcuts() -> Tuple[bool, str]:
+    """Creates or updates Desktop and Start Menu shortcuts for Clean APO."""
+    try:
+        import subprocess
+
+        exe_path = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(sys.argv[0])
+        # If running in development/source mode, prioritize installed or dist CleanAPO.exe
+        if not getattr(sys, "frozen", False):
+            candidate_installed = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Clean APO\CleanAPO.exe")
+            candidate_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist", "CleanAPO.exe")
+            if os.path.isfile(candidate_installed):
+                exe_path = candidate_installed
+            elif os.path.isfile(candidate_dist):
+                exe_path = candidate_dist
+
+        work_dir = os.path.dirname(exe_path)
+        icon_path = os.path.join(work_dir, "clean_apo.ico")
+        if not os.path.isfile(icon_path):
+            alt_icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "clean_apo.ico")
+            if os.path.isfile(alt_icon):
+                icon_path = alt_icon
+            else:
+                icon_path = exe_path
+
+        ps_script = f'''
+        $WshShell = New-Object -ComObject WScript.Shell
+        $desktopPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Clean APO.lnk"
+        $s1 = $WshShell.CreateShortcut($desktopPath)
+        $s1.TargetPath = "{exe_path}"
+        $s1.WorkingDirectory = "{work_dir}"
+        $s1.IconLocation = "{icon_path},0"
+        $s1.Description = "Clean APO - High-Performance Audio Equalizer & AutoEQ Studio"
+        $s1.Save()
+
+        $startMenuPath = Join-Path ([Environment]::GetFolderPath("Programs")) "Clean APO.lnk"
+        $s2 = $WshShell.CreateShortcut($startMenuPath)
+        $s2.TargetPath = "{exe_path}"
+        $s2.WorkingDirectory = "{work_dir}"
+        $s2.IconLocation = "{icon_path},0"
+        $s2.Description = "Clean APO - High-Performance Audio Equalizer & AutoEQ Studio"
+        $s2.Save()
+        '''
+        creation_flags = 0x08000000 if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            check=True,
+            creationflags=creation_flags,
+        )
+        return True, "Shortcuts created on Desktop and Start Menu!"
+    except Exception as e:
+        return False, str(e)
 
 
 # Built-in factory presets
@@ -770,45 +907,82 @@ class PresetManager(QtCore.QObject):
         content = "\n".join(lines) + "\n"
 
         target_path = self.apo_target_path
+        appdata_path = os.path.join(get_app_data_dir(), "clean_apo_generated.txt")
         used_path = target_path
         success = False
         msg = ""
 
-        try:
-            target_dir = os.path.dirname(target_path)
-            if target_dir and not os.path.exists(target_dir):
-                os.makedirs(target_dir, exist_ok=True)
-
-            # 1. Ensure Equalizer APO's main config.txt includes our file(s)
-            ensure_apo_root_config_include(target_path)
-
-            # 2. Write primary target file
-            with open(target_path, "w", encoding="utf-8") as f:
-                f.write(content)
-
-            # 3. Clean legacy peqdb_generated.txt so it does not contain duplicate filters
-            if target_dir and os.path.exists(target_dir):
-                legacy_path = os.path.join(target_dir, "peqdb_generated.txt")
-                if legacy_path != target_path and os.path.exists(legacy_path):
-                    try:
-                        with open(legacy_path, "w", encoding="utf-8") as fm:
-                            fm.write("# Clean APO now outputs to clean_apo_generated.txt\n")
-                    except Exception:
-                        pass
-
-            success = True
-            used_path = target_path
-            msg = f"Synced with Equalizer APO ({os.path.basename(target_path)})"
-        except (PermissionError, OSError) as e:
-            used_path = LOCAL_FALLBACK_PATH
+        # Check write permission for target_path
+        if not can_write_to_path(target_path):
+            # Target is not directly writable without elevation; redirect to AppData path
+            used_path = appdata_path
             try:
-                with open(LOCAL_FALLBACK_PATH, "w", encoding="utf-8") as f:
+                os.makedirs(os.path.dirname(appdata_path), exist_ok=True)
+                with open(appdata_path, "w", encoding="utf-8") as f:
                     f.write(content)
-                success = False
-                msg = f"Permission denied for APO folder. Saved to local: {LOCAL_FALLBACK_PATH}"
-            except Exception as e_local:
-                success = False
-                msg = f"Failed writing EQ file: {e_local}"
+                # Ensure Equalizer APO's main config.txt includes this absolute AppData path
+                inc_ok = ensure_apo_root_config_include(appdata_path)
+                success = True
+                if inc_ok:
+                    msg = f"Synced with Equalizer APO via AppData ({os.path.basename(appdata_path)})"
+                else:
+                    msg = f"Saved to AppData. Equalizer APO config.txt needs UAC elevation to include it."
+            except Exception as e_appdata:
+                used_path = LOCAL_FALLBACK_PATH
+                try:
+                    with open(LOCAL_FALLBACK_PATH, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    success = False
+                    msg = f"Permission denied for APO folder. Saved to local: {LOCAL_FALLBACK_PATH}"
+                except Exception as e_local:
+                    success = False
+                    msg = f"Failed writing EQ file: {e_local}"
+        else:
+            try:
+                target_dir = os.path.dirname(target_path)
+                if target_dir and not os.path.exists(target_dir):
+                    os.makedirs(target_dir, exist_ok=True)
+
+                # 1. Ensure Equalizer APO's main config.txt includes our file(s)
+                ensure_apo_root_config_include(target_path)
+
+                # 2. Write primary target file
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+                # 3. Clean legacy peqdb_generated.txt so it does not contain duplicate filters
+                if target_dir and os.path.exists(target_dir):
+                    legacy_path = os.path.join(target_dir, "peqdb_generated.txt")
+                    if legacy_path != target_path and os.path.exists(legacy_path):
+                        try:
+                            with open(legacy_path, "w", encoding="utf-8") as fm:
+                                fm.write("# Clean APO now outputs to clean_apo_generated.txt\n")
+                        except Exception:
+                            pass
+
+                success = True
+                used_path = target_path
+                msg = f"Synced with Equalizer APO ({os.path.basename(target_path)})"
+            except (PermissionError, OSError) as e:
+                # If unexpected permission error during primary write, fall back to AppData path
+                used_path = appdata_path
+                try:
+                    os.makedirs(os.path.dirname(appdata_path), exist_ok=True)
+                    with open(appdata_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    ensure_apo_root_config_include(appdata_path)
+                    success = True
+                    msg = f"Permission denied for Program Files. Synced via AppData ({os.path.basename(appdata_path)})"
+                except Exception as e_fallback:
+                    used_path = LOCAL_FALLBACK_PATH
+                    try:
+                        with open(LOCAL_FALLBACK_PATH, "w", encoding="utf-8") as f:
+                            f.write(content)
+                        success = False
+                        msg = f"Saved to local fallback: {LOCAL_FALLBACK_PATH}"
+                    except Exception as e_final:
+                        success = False
+                        msg = f"Failed writing EQ file: {e_final}"
 
         self.active_apo_path = used_path
         self.sigApoSyncStatus.emit(success, msg)

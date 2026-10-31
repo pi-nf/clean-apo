@@ -12,9 +12,10 @@ from typing import List, Dict, Optional, Tuple, Any, Sequence
 
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.signal import find_peaks
 from PyQt6 import QtCore
 
-from biquad import biquad_coeffs, FilterType, EQBand
+from biquad import biquad_coeffs, compute_filter_response, FilterType, EQBand
 
 
 @dataclass
@@ -134,15 +135,54 @@ def optimize_parametric_eq(
         return total
 
     # 7. Initial Parameter Estimates & Bounds
-    # Log-spaced initial frequencies
+    # Seed peak filters on dominant resonance peaks/dips using find_peaks on |error_curve|
+    num_peak_bands = (num_bands - 1) if (use_bass_shelf and num_bands > 1) else (0 if (use_bass_shelf and num_bands == 1) else num_bands)
+    selected_peak_freqs: List[float] = []
+
+    if num_peak_bands > 0:
+        abs_err = np.abs(error_curve)
+        search_f_min = 100.0
+        search_f_max = min(max_freq, 8500.0)
+
+        # 1. Identify dominant resonance peaks and dips over 100 Hz to 8.5 kHz
+        detected_indices, _ = find_peaks(abs_err, distance=4)
+        valid_peaks = [idx for idx in detected_indices if search_f_min <= f_grid[idx] <= search_f_max]
+        # Sort detected peaks by magnitude of error descending
+        valid_peaks.sort(key=lambda idx: abs_err[idx], reverse=True)
+
+        # 2. Seed peak filter initial frequencies on detected peaks first
+        for idx in valid_peaks:
+            cand_f = float(f_grid[idx])
+            if all(abs(np.log2(cand_f / sf)) >= 0.2 for sf in selected_peak_freqs):
+                selected_peak_freqs.append(cand_f)
+                if len(selected_peak_freqs) >= num_peak_bands:
+                    break
+
+        # 3. Fill any remaining unallocated bands with logarithmic spacing across uncovered intervals
+        if len(selected_peak_freqs) < num_peak_bands:
+            f_low = 120.0 if use_bass_shelf else min_freq * 1.5
+            f_high = max_freq * 0.95
+            boundaries = sorted(set([f_low, f_high] + selected_peak_freqs))
+            while len(selected_peak_freqs) < num_peak_bands:
+                best_idx = 0
+                max_ratio = 0.0
+                for i in range(len(boundaries) - 1):
+                    ratio = boundaries[i + 1] / boundaries[i]
+                    if ratio > max_ratio:
+                        max_ratio = ratio
+                        best_idx = i
+                mid = float(np.sqrt(boundaries[best_idx] * boundaries[best_idx + 1]))
+                selected_peak_freqs.append(mid)
+                boundaries.append(mid)
+                boundaries.sort()
+
     if use_bass_shelf and num_bands > 1:
         shelf_f = 60.0
-        peak_freqs = np.geomspace(120.0, max_freq * 0.95, num_bands - 1)
-        init_freqs = [shelf_f] + list(peak_freqs)
+        init_freqs = [shelf_f] + sorted(selected_peak_freqs)
     elif use_bass_shelf and num_bands == 1:
         init_freqs = [60.0]
     else:
-        init_freqs = list(np.geomspace(min_freq * 1.5, max_freq * 0.95, num_bands))
+        init_freqs = sorted(selected_peak_freqs)
 
     x0: List[float] = []
     bounds_lower: List[float] = []
@@ -224,9 +264,16 @@ def optimize_parametric_eq(
         )
 
     # 11. Preamp Calculation
-    # Set digital preamp gain to -max(EQ_Gain) across entire audible spectrum to avoid digital clipping
-    peak_gain = float(np.max(final_eq_curve))
-    preamp_db = -round(max(0.0, peak_gain), 1)
+    # Evaluate composite response of rounded final_bands directly to avoid digital clipping
+    final_eval = np.sum(
+        [compute_filter_response(b.filter_type, b.freq, b.gain, b.q, f_grid, fs) for b in final_bands],
+        axis=0,
+    )
+    peak_gain = float(np.max(final_eval))
+    preamp_db = -round(max(0.0, peak_gain) + 0.1, 1)
+
+    # Recalculate final RMS with the exact rounded bands
+    final_rms = float(np.sqrt(np.mean((error_curve - final_eval)[active_mask] ** 2)))
 
     t_end = time.perf_counter()
     elapsed_ms = (t_end - t_start) * 1000.0
@@ -241,7 +288,7 @@ def optimize_parametric_eq(
         meas_aligned_spl=spl_meas_aligned,
         target_aligned_spl=spl_target,
         error_curve=error_curve,
-        eq_response_curve=final_eq_curve,
+        eq_response_curve=final_eval,
     )
 
 

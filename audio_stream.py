@@ -459,9 +459,6 @@ class AudioSpectrumWorker(QtCore.QThread):
                         self._smoothed_mags[~rising] = (
                             0.15 * normalized_db[~rising] + 0.85 * self._smoothed_mags[~rising]
                         )
-                        self._smoothed_mags[~rising] = (
-                            0.15 * normalized_db[~rising] + 0.85 * self._smoothed_mags[~rising]
-                        )
                     else:
                         # Smooth graceful decay during silence towards bottom floor (-20 dB)
                         self._smoothed_mags = np.maximum(-20.0, self._smoothed_mags - 0.75)

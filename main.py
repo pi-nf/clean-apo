@@ -41,6 +41,8 @@ from presets import (
     get_bundled_apo_installer_path,
     launch_apo_installer,
     ensure_apo_root_config_include,
+    grant_apo_directory_permissions,
+    create_windows_shortcuts,
 )
 from audio_stream import AudioSpectrumWorker, get_available_audio_devices, get_available_playback_devices
 from eq_plot import (
@@ -2456,9 +2458,19 @@ class SettingsDialog(QtWidgets.QDialog):
         test_btn.clicked.connect(self._test_permissions)
         btn_row.addWidget(test_btn)
 
+        fix_btn = QtWidgets.QPushButton("Grant APO Permissions (UAC)")
+        fix_btn.setToolTip("Request Administrator privileges via UAC to grant standard user write access to Equalizer APO folder")
+        fix_btn.clicked.connect(self._fix_permissions)
+        btn_row.addWidget(fix_btn)
+
         default_btn = QtWidgets.QPushButton("Reset to Default APO Path")
         default_btn.clicked.connect(lambda: self.path_edit.setText(DEFAULT_APO_PATH))
         btn_row.addWidget(default_btn)
+
+        shortcut_btn = QtWidgets.QPushButton("Create Desktop Shortcut")
+        shortcut_btn.setToolTip("Creates or updates Clean APO shortcuts on your Desktop and Start Menu")
+        shortcut_btn.clicked.connect(self._create_shortcuts)
+        btn_row.addWidget(shortcut_btn)
 
         btn_row.addStretch()
 
@@ -2502,6 +2514,26 @@ class SettingsDialog(QtWidgets.QDialog):
             self.status_label.setStyleSheet("color: #ffffff; font-weight: bold;")
         except Exception as e:
             self.status_label.setText(f"Permission Error: {e}")
+            self.status_label.setStyleSheet("color: #f87171; font-weight: bold;")
+
+    def _fix_permissions(self) -> None:
+        folder = os.path.dirname(self.path_edit.text().strip())
+        ok, msg = grant_apo_directory_permissions(folder)
+        if ok:
+            self.status_label.setText("Permissions granted successfully via UAC!")
+            self.status_label.setStyleSheet("color: #ffffff; font-weight: bold;")
+            self._test_permissions()
+        else:
+            self.status_label.setText(f"Could not elevate: {msg}")
+            self.status_label.setStyleSheet("color: #f87171; font-weight: bold;")
+
+    def _create_shortcuts(self) -> None:
+        ok, msg = create_windows_shortcuts()
+        if ok:
+            self.status_label.setText("Success: Clean APO shortcuts created on Desktop & Start Menu!")
+            self.status_label.setStyleSheet("color: #4ade80; font-weight: bold;")
+        else:
+            self.status_label.setText(f"Shortcut Error: {msg}")
             self.status_label.setStyleSheet("color: #f87171; font-weight: bold;")
 
     def _on_save(self) -> None:

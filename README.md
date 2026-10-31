@@ -95,6 +95,12 @@ To compile a standalone `.exe`:
 .\build.ps1
 ```
 
+To install Clean APO as a native Windows desktop application (with Desktop & Start Menu shortcuts):
+
+```powershell
+.\install.ps1
+```
+
 ---
 
 ## Shortcuts & Controls
