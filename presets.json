@@ -1392,6 +1392,62 @@
         "freq": 222.14883024790896,
         "gain": -3.429844097995545,
         "q": 1.414
+      },
+      {
+        "band_id": 6,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 420.5687631095879,
+        "gain": -0.40089086859688194,
+        "q": 1.414
+      },
+      {
+        "band_id": 7,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 802.7,
+        "gain": 0.9,
+        "q": 1.414
+      },
+      {
+        "band_id": 8,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1182.9321089183493,
+        "gain": -0.31180400890868754,
+        "q": 1.414
+      },
+      {
+        "band_id": 9,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 1905.3614058039639,
+        "gain": 2.538975501113587,
+        "q": 1.882
+      },
+      {
+        "band_id": 10,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 2313.065283580503,
+        "gain": 1.8262806236080174,
+        "q": 4.445
+      },
+      {
+        "band_id": 11,
+        "enabled": true,
+        "filter_type": "Peak",
+        "freq": 4709.337548383651,
+        "gain": 2.2717149220489965,
+        "q": 1.414
+      },
+      {
+        "band_id": 12,
+        "enabled": true,
+        "filter_type": "High Shelf",
+        "freq": 8632.124886986152,
+        "gain": 5.211581291759465,
+        "q": 0.965
       }
     ],
     "autoeq": {
