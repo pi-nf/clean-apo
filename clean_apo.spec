@@ -43,6 +43,7 @@ hidden_imports = [
     'PyQt6.QtCore',
     'PyQt6.QtGui',
     'PyQt6.QtWidgets',
+    'PyQt6.QtMultimedia',
     'requests',
     'urllib.parse',
     'sqlite3',

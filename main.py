@@ -10,23 +10,32 @@ import sys
 import math
 import urllib.parse
 from collections import deque
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
+import ctypes
+from ctypes import wintypes
 import numpy as np
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6.QtMultimedia import QMediaDevices
 import pyqtgraph as pg
 
 def _qt_message_filter(mode, context, message):
-    msg = str(message)
-    if "setPointSize" in msg or "Point size" in msg or "pointSize" in msg:
-        return
-    if mode == QtCore.QtMsgType.QtFatalMsg:
-        sys.stderr.write(f"Fatal: {message}\n")
-        sys.exit(1)
-    elif mode == QtCore.QtMsgType.QtCriticalMsg:
-        sys.stderr.write(f"Critical: {message}\n")
-    elif mode == QtCore.QtMsgType.QtWarningMsg:
-        sys.stderr.write(f"Warning: {message}\n")
+    try:
+        msg = str(message)
+        if "setPointSize" in msg or "Point size" in msg or "pointSize" in msg:
+            return
+        if mode == QtCore.QtMsgType.QtFatalMsg:
+            if sys.stderr is not None:
+                sys.stderr.write(f"Fatal: {message}\n")
+            sys.exit(1)
+        elif mode == QtCore.QtMsgType.QtCriticalMsg:
+            if sys.stderr is not None:
+                sys.stderr.write(f"Critical: {message}\n")
+        elif mode == QtCore.QtMsgType.QtWarningMsg:
+            if sys.stderr is not None:
+                sys.stderr.write(f"Warning: {message}\n")
+    except Exception:
+        pass
 
 QtCore.qInstallMessageHandler(_qt_message_filter)
 
@@ -4001,9 +4010,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preamp_anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
         self._preamp_anim.valueChanged.connect(self._on_preamp_anim_step)
 
-        # Device hotplug monitor timer (checks every 2.5s)
+        # QMediaDevices listener for instant native Windows hotplug / default change events
+        self._media_devices: Optional[QMediaDevices] = None
+        self._last_default_output_id: Optional[bytes] = None
+        self._last_output_devices_snapshot: List[str] = []
+        try:
+            self._media_devices = QMediaDevices(self)
+            self._media_devices.audioOutputsChanged.connect(self._on_audio_hardware_changed)
+            self._media_devices.audioInputsChanged.connect(self._on_audio_hardware_changed)
+            def_out = self._media_devices.defaultAudioOutput()
+            if def_out:
+                self._last_default_output_id = bytes(def_out.id())
+            self._last_output_devices_snapshot = [d.description() for d in self._media_devices.audioOutputs()]
+        except Exception as e:
+            print(f"[MainWindow] QMediaDevices init error: {e}")
+
+        # Device hotplug monitor timer (polling backup checking every 1.5s)
         self._device_hotplug_timer = QtCore.QTimer(self)
-        self._device_hotplug_timer.setInterval(2500)
+        self._device_hotplug_timer.setInterval(1500)
         self._device_hotplug_timer.timeout.connect(self._check_device_hotplug)
         self._device_hotplug_timer.start()
 
@@ -4085,6 +4109,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     self.central_widget.setStyleSheet("QWidget#centralWidget { background-color: #000000; border: 1px solid #27272a; border-radius: 10px; }")
         super().changeEvent(event)
+
+    def nativeEvent(self, eventType: QtCore.QByteArray | bytes, message: int | Any) -> Tuple[bool, int]:
+        # Handle WM_DEVICECHANGE (0x0219) for USB, DAC, and 3.5mm plug/unplug events
+        try:
+            if eventType == b"windows_generic_MSG":
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                if msg.message == 0x0219:  # WM_DEVICECHANGE
+                    QtCore.QTimer.singleShot(250, self._on_audio_hardware_changed)
+        except Exception:
+            pass
+        return False, 0
 
     def _toggle_maximize_restore(self) -> None:
         if self.isMaximized():
@@ -4185,12 +4220,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_menu_settings.clicked.connect(self._open_settings)
         layout.addWidget(self.btn_menu_settings)
 
-        # Menu 2: Input (Target Playback Device for Equalizer APO)
-        self.btn_menu_input = QtWidgets.QPushButton("Input")
-        self.btn_menu_input.setObjectName("topMenuBtn")
-        self.btn_menu_input.setToolTip("Select Equalizer APO Playback Target Device")
-        self.btn_menu_input.clicked.connect(self._show_input_menu)
-        layout.addWidget(self.btn_menu_input)
+        # Menu 2: Output (Target Playback Device for Equalizer APO)
+        self.btn_menu_output = QtWidgets.QPushButton("Output")
+        self.btn_menu_output.setObjectName("topMenuBtn")
+        self.btn_menu_output.setToolTip("Select Equalizer APO Playback / Output Target Device")
+        self.btn_menu_output.clicked.connect(self._show_output_menu)
+        self.btn_menu_input = self.btn_menu_output  # Backward-compatibility alias
+        layout.addWidget(self.btn_menu_output)
 
         # Menu 3: Capture Device (Loopback Capture for Spectrum Analyzer)
         self.btn_menu_capture = QtWidgets.QPushButton("Capture Device")
@@ -4286,13 +4322,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return frame
 
-    def _show_input_menu(self) -> None:
-        self.btn_menu_input.setStyleSheet("background-color: #27272a; color: #ffffff;")
-        menu = self._create_input_menu()
-        menu.exec(self.btn_menu_input.mapToGlobal(QtCore.QPoint(0, self.btn_menu_input.height() + 3)))
-        self.btn_menu_input.setStyleSheet("")
+    def _show_output_menu(self) -> None:
+        self.btn_menu_output.setStyleSheet("background-color: #27272a; color: #ffffff;")
+        menu = self._create_output_menu()
+        menu.exec(self.btn_menu_output.mapToGlobal(QtCore.QPoint(0, self.btn_menu_output.height() + 3)))
+        self.btn_menu_output.setStyleSheet("")
 
-    def _create_input_menu(self) -> QtWidgets.QMenu:
+    def _show_input_menu(self) -> None:
+        """Backward-compatibility alias for _show_output_menu."""
+        self._show_output_menu()
+
+    def _create_output_menu(self) -> QtWidgets.QMenu:
         menu = QtWidgets.QMenu(self)
         active_name = self.preset_manager.active_device_name
         is_all = clean_apo_device_name(active_name) == "all"
@@ -4300,30 +4340,52 @@ class MainWindow(QtWidgets.QMainWindow):
         act_all = menu.addAction("All Endpoints (Default / Global)")
         act_all.setCheckable(True)
         act_all.setChecked(is_all)
-        act_all.triggered.connect(lambda: self._on_input_device_selected(None, "All Endpoints"))
+        act_all.triggered.connect(lambda: self._on_output_device_selected(None, "All Endpoints"))
 
         devices = self._get_playback_devices()
         if devices:
             menu.addSeparator()
+
+            # Identify Windows Default output device for helpful badging
+            default_desc = ""
+            if self._media_devices:
+                try:
+                    def_out = self._media_devices.defaultAudioOutput()
+                    if def_out:
+                        default_desc = def_out.description().strip()
+                except Exception:
+                    pass
+
             for dev_name in devices:
-                act = menu.addAction(dev_name)
+                label = dev_name
+                if default_desc and (clean_apo_device_name(default_desc).lower() == clean_apo_device_name(dev_name).lower()):
+                    label = f"{dev_name}  (Windows Default)"
+                act = menu.addAction(label)
                 act.setCheckable(True)
                 checked = not is_all and (clean_apo_device_name(active_name).lower() == clean_apo_device_name(dev_name).lower())
                 act.setChecked(checked)
-                act.triggered.connect(lambda checked, d=dev_name: self._on_input_device_selected(d, d))
+                act.triggered.connect(lambda checked, d=dev_name: self._on_output_device_selected(d, d))
 
         return menu
+
+    def _create_input_menu(self) -> QtWidgets.QMenu:
+        """Backward-compatibility alias for _create_output_menu."""
+        return self._create_output_menu()
 
     def _get_playback_devices(self) -> List[str]:
         return get_available_playback_devices()
 
-    def _on_input_device_selected(self, dev_id: Optional[str], dev_name: str) -> None:
+    def _on_output_device_selected(self, dev_id: Optional[str], dev_name: str) -> None:
         self.preset_manager.set_active_device_name(dev_id)
         preamp_val, bands = self._collect_current_eq_state()
         self.preset_manager.schedule_apo_export(
             preamp_val, bands, bypassed=self.is_eq_bypassed
         )
         self._check_device_apo_status(dev_name)
+
+    def _on_input_device_selected(self, dev_id: Optional[str], dev_name: str) -> None:
+        """Backward-compatibility alias for _on_output_device_selected."""
+        self._on_output_device_selected(dev_id, dev_name)
 
     def _show_capture_menu(self) -> None:
         self.btn_menu_capture.setStyleSheet("background-color: #27272a; color: #ffffff;")
@@ -4334,27 +4396,37 @@ class MainWindow(QtWidgets.QMainWindow):
     def _create_capture_menu(self) -> QtWidgets.QMenu:
         menu = QtWidgets.QMenu(self)
         current_idx = self.preset_manager.audio_device_index
+        current_name = getattr(self.preset_manager, "audio_device_name", None)
         devices = get_available_audio_devices()
+
+        is_auto_follow = (current_idx is None and not current_name) or (current_name and ("auto-follow" in current_name.lower() or "default" in current_name.lower()))
 
         act_default = menu.addAction("Default Windows Audio (Auto-Follow)")
         act_default.setCheckable(True)
-        act_default.setChecked(current_idx is None)
-        act_default.triggered.connect(lambda: self._on_capture_device_selected(None, "Default Windows Audio (Auto-Follow)"))
+        act_default.setChecked(is_auto_follow)
+        act_default.triggered.connect(lambda: self._on_capture_device_selected(None, None))
 
-        non_default = [(idx, name) for idx, name in devices if idx is not None]
+        non_default = [(idx, name) for idx, name in devices if name and "auto-follow" not in name.lower()]
         if non_default:
             menu.addSeparator()
             for idx, name in non_default:
                 act = menu.addAction(name)
                 act.setCheckable(True)
-                act.setChecked(current_idx is not None and current_idx == idx)
+                checked = False
+                if not is_auto_follow:
+                    if current_name and clean_apo_device_name(current_name).lower() == clean_apo_device_name(name).lower():
+                        checked = True
+                    elif current_idx is not None and idx is not None and current_idx == idx:
+                        checked = True
+                act.setChecked(checked)
                 act.triggered.connect(lambda checked, i=idx, n=name: self._on_capture_device_selected(i, n))
 
         return menu
 
-    def _on_capture_device_selected(self, dev_idx: Optional[int], dev_name: str) -> None:
-        self.spectrum_worker.set_device_index(dev_idx)
+    def _on_capture_device_selected(self, dev_idx: Optional[int], dev_name: Optional[str]) -> None:
+        self.spectrum_worker.set_device_target(dev_idx, dev_name)
         self.preset_manager.audio_device_index = dev_idx
+        self.preset_manager.audio_device_name = dev_name
         self.preset_manager.save_settings()
 
     # -------------------------------------------------------------------------
@@ -4896,12 +4968,54 @@ class MainWindow(QtWidgets.QMainWindow):
     # -------------------------------------------------------------------------
     def _init_audio_device(self) -> None:
         active_idx = self.preset_manager.audio_device_index
-        self.spectrum_worker.set_device_index(active_idx)
+        active_capture_name = getattr(self.preset_manager, "audio_device_name", None)
+        self.spectrum_worker.set_device_target(active_idx, active_capture_name)
         active_name = self.preset_manager.active_device_name
         self._check_device_apo_status(active_name or "All Endpoints")
 
-    def _check_device_hotplug(self) -> None:
-        pass
+    def _on_audio_hardware_changed(self) -> None:
+        """Triggered immediately when Windows audio hardware is connected, disconnected, or default changes."""
+        self._check_device_hotplug(force=True)
+
+    def _check_device_hotplug(self, force: bool = False) -> None:
+        """
+        Detects audio hardware changes and default audio output switches in real time.
+        Seamlessly triggers spectrum loopback reconnection so audio visualization never drops.
+        """
+        changed = force
+        new_def_id = None
+        new_devs = []
+
+        if self._media_devices:
+            try:
+                def_out = self._media_devices.defaultAudioOutput()
+                if def_out:
+                    new_def_id = bytes(def_out.id())
+                new_devs = [d.description() for d in self._media_devices.audioOutputs()]
+
+                if new_def_id != self._last_default_output_id:
+                    changed = True
+                    def_name = def_out.description() if def_out else "Unknown"
+                    print(f"[AudioDevices] Windows Default Output switched to: {def_name}")
+                    self._last_default_output_id = new_def_id
+
+                if set(new_devs) != set(self._last_output_devices_snapshot):
+                    changed = True
+                    print(f"[AudioDevices] Audio endpoints updated: {new_devs}")
+                    self._last_output_devices_snapshot = new_devs
+            except Exception as e:
+                print(f"[AudioDevices] Hotplug check error: {e}")
+
+        if changed:
+            current_idx = self.preset_manager.audio_device_index
+            current_name = getattr(self.preset_manager, "audio_device_name", None)
+            is_auto_follow = (current_idx is None and not current_name) or (current_name and ("auto-follow" in current_name.lower() or "default" in current_name.lower()))
+
+            if is_auto_follow:
+                print("[AudioDevices] Auto-Follow active: seamlessly updating spectrum loopback to new default device.")
+                self.spectrum_worker.restart_stream()
+            else:
+                self.spectrum_worker.restart_stream()
 
     def _collect_current_eq_state(self) -> Tuple[float, List[EQBand]]:
         return self.preamp_spin.value(), list(self.eq_plot.bands)
@@ -7327,16 +7441,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main():
     def qt_message_filter(mode, context, message):
-        # Silence benign Qt/pyqtgraph font point size warning when style pixel sizes are used
-        if "setPointSize" in message and "<= 0" in message:
-            return
-        if mode == QtCore.QtMsgType.QtFatalMsg:
-            sys.stderr.write(f"Fatal: {message}\n")
-            sys.exit(1)
-        elif mode == QtCore.QtMsgType.QtCriticalMsg:
-            sys.stderr.write(f"Critical: {message}\n")
-        elif mode == QtCore.QtMsgType.QtWarningMsg:
-            sys.stderr.write(f"Warning: {message}\n")
+        try:
+            # Silence benign Qt/pyqtgraph font point size warning when style pixel sizes are used
+            if "setPointSize" in message and "<= 0" in message:
+                return
+            if mode == QtCore.QtMsgType.QtFatalMsg:
+                if sys.stderr is not None:
+                    sys.stderr.write(f"Fatal: {message}\n")
+                sys.exit(1)
+            elif mode == QtCore.QtMsgType.QtCriticalMsg:
+                if sys.stderr is not None:
+                    sys.stderr.write(f"Critical: {message}\n")
+            elif mode == QtCore.QtMsgType.QtWarningMsg:
+                if sys.stderr is not None:
+                    sys.stderr.write(f"Warning: {message}\n")
+        except Exception:
+            pass
 
     QtCore.qInstallMessageHandler(qt_message_filter)
 

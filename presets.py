@@ -584,6 +584,7 @@ class PresetManager(QtCore.QObject):
         self.apo_target_path: str = DEFAULT_APO_PATH
         self.active_apo_path: str = DEFAULT_APO_PATH
         self.audio_device_index: Optional[int] = None
+        self.audio_device_name: Optional[str] = None
         self.active_device_name: Optional[str] = None
         self.favorite_databases: List[str] = ["peqdb", "superreview", "superreview_hp", "jaraba", "aden"]
         
@@ -625,6 +626,7 @@ class PresetManager(QtCore.QObject):
                     self.apo_target_path = self.settings.get("apo_path", DEFAULT_APO_PATH)
                     self.active_preset_name = self.settings.get("active_preset", "Flat (Default)")
                     self.audio_device_index = self.settings.get("audio_device_index", None)
+                    self.audio_device_name = self.settings.get("audio_device_name", None)
                     self.active_device_name = self.settings.get("active_device_name", None)
                     self.favorite_databases = self.settings.get(
                         "favorite_databases",
@@ -646,6 +648,7 @@ class PresetManager(QtCore.QObject):
                 "apo_path": self.apo_target_path,
                 "active_preset": self.active_preset_name,
                 "audio_device_index": self.audio_device_index,
+                "audio_device_name": self.audio_device_name,
                 "active_device_name": self.active_device_name,
                 "favorite_databases": self.favorite_databases,
             })

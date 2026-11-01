@@ -8,10 +8,11 @@ import sys
 import time
 import queue
 import threading
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Any
 import numpy as np
 import scipy.sparse as sp
 from PyQt6 import QtCore
+from presets import clean_apo_device_name
 
 HAVE_PYAUDIOWPATCH = False
 try:
@@ -32,12 +33,14 @@ def get_available_audio_devices() -> List[Tuple[Optional[int], str]]:
     """
     Returns a list of available audio capture / loopback devices as (index, display_name).
     Includes auto-tracking Windows Default Audio endpoint.
+    Dynamically integrates with QMediaDevices so newly plugged-in devices are always visible.
     """
     devices: List[Tuple[Optional[int], str]] = []
     # 0. Always offer automatic Default Windows Audio tracker as the top choice
     devices.append((None, "Default Windows Audio (Auto-Follow)"))
 
     seen_indices = set()
+    seen_names = set()
 
     if HAVE_PYAUDIOWPATCH:
         p = None
@@ -51,6 +54,7 @@ def get_available_audio_devices() -> List[Tuple[Optional[int], str]]:
                     if idx not in seen_indices:
                         seen_indices.add(idx)
                         name = dev["name"].replace(" [Loopback]", "").strip()
+                        seen_names.add(clean_apo_device_name(name).lower())
                         devices.append((idx, f"{name} (Loopback)"))
             except Exception as e:
                 print(f"[AudioDevices] Loopback generator error: {e}")
@@ -68,6 +72,7 @@ def get_available_audio_devices() -> List[Tuple[Optional[int], str]]:
                                 if a_idx not in seen_indices:
                                     seen_indices.add(a_idx)
                                     a_name = analog["name"].replace(" [Loopback]", "").strip()
+                                    seen_names.add(clean_apo_device_name(a_name).lower())
                                     devices.append((a_idx, f"{a_name} (Loopback)"))
                         except Exception:
                             pass
@@ -82,6 +87,19 @@ def get_available_audio_devices() -> List[Tuple[Optional[int], str]]:
                     p.terminate()
                 except Exception:
                     pass
+
+    # 3. Seamlessly merge in any active Windows playback devices from QMediaDevices
+    # This guarantees that newly plugged-in USB DACs or headphones are immediately visible in the menu!
+    try:
+        from PyQt6.QtMultimedia import QMediaDevices
+        for d in QMediaDevices.audioOutputs():
+            desc = d.description().strip()
+            clean_d = clean_apo_device_name(desc).lower()
+            if desc and clean_d not in seen_names:
+                seen_names.add(clean_d)
+                devices.append((None, f"{desc} (Loopback)"))
+    except Exception as e:
+        print(f"[AudioDevices] QMediaDevices loopback discovery notice: {e}")
 
     if len(devices) <= 1 and HAVE_SOUNDDEVICE:
         try:
@@ -98,10 +116,28 @@ def get_available_audio_devices() -> List[Tuple[Optional[int], str]]:
 def get_available_playback_devices() -> List[str]:
     """
     Returns a list of available audio playback/output device names for Equalizer APO targeting.
+    Queries QMediaDevices (Windows MMDevice API) first for instant real-time hotplug awareness,
+    falling back to PyAudio and sounddevice.
     """
     playback_devs: List[str] = []
     seen = set()
 
+    # 1. Primary: Direct Windows MMDevice query via QMediaDevices (instant hotplug awareness)
+    try:
+        from PyQt6.QtMultimedia import QMediaDevices
+        outputs = QMediaDevices.audioOutputs()
+        if outputs:
+            for d in outputs:
+                desc = d.description().strip()
+                if desc and desc not in seen:
+                    seen.add(desc)
+                    playback_devs.append(desc)
+            if playback_devs:
+                return playback_devs
+    except Exception as e:
+        print(f"[PlaybackDevices] QMediaDevices query notice: {e}")
+
+    # 2. Secondary fallback: PyAudio
     if HAVE_PYAUDIOWPATCH:
         p = None
         try:
@@ -127,6 +163,7 @@ def get_available_playback_devices() -> List[str]:
                 except Exception:
                     pass
 
+    # 3. Tertiary fallback: sounddevice
     if not playback_devs and HAVE_SOUNDDEVICE:
         try:
             for d in sd.query_devices():
@@ -170,6 +207,7 @@ class AudioSpectrumWorker(QtCore.QThread):
         self._restart_event = threading.Event()
         self._enabled = True
         self._device_index: Optional[int] = None
+        self._device_name: Optional[str] = None
         
         # Dynamic AGC normalization gain
         self._agc_gain_db = 38.0
@@ -220,10 +258,21 @@ class AudioSpectrumWorker(QtCore.QThread):
             self.sigSpectrumReady.emit(self.target_freqs, self._smoothed_mags.copy())
 
     def set_device_index(self, device_index: Optional[int]) -> None:
-        """Switches the active audio loopback capture device."""
+        """Switches the active audio loopback capture device by index."""
         if self._device_index != device_index:
             self._device_index = device_index
             self._restart_event.set()
+
+    def set_device_target(self, device_index: Optional[int], device_name: Optional[str] = None) -> None:
+        """Switches the active audio loopback capture device by index and/or friendly name."""
+        if self._device_index != device_index or self._device_name != device_name:
+            self._device_index = device_index
+            self._device_name = device_name
+            self._restart_event.set()
+
+    def restart_stream(self) -> None:
+        """Triggers a clean restart of the audio loopback stream and device re-enumeration."""
+        self._restart_event.set()
 
     def stop(self) -> None:
         """Stops the worker thread cleanly."""
@@ -262,7 +311,21 @@ class AudioSpectrumWorker(QtCore.QThread):
             pa = pyaudio.PyAudio()
             loopback_device = None
 
-            if self._device_index is not None:
+            # 1. Target matching by device friendly name (highest resilience to index shifts)
+            if self._device_name and "auto-follow" not in self._device_name.lower() and "default" not in self._device_name.lower():
+                clean_target = clean_apo_device_name(self._device_name).lower()
+                try:
+                    for dev in pa.get_loopback_device_info_generator():
+                        d_name = dev["name"].replace(" [Loopback]", "").strip()
+                        clean_d = clean_apo_device_name(d_name).lower()
+                        if clean_target == clean_d or clean_target in clean_d or clean_d in clean_target:
+                            loopback_device = dev
+                            break
+                except Exception as e:
+                    print(f"[AudioStream] Name lookup notice: {e}")
+
+            # 2. Target lookup by device index
+            if not loopback_device and self._device_index is not None:
                 try:
                     dev_info = pa.get_device_info_by_index(self._device_index)
                     if dev_info.get("isLoopbackDevice", False) or dev_info.get("maxInputChannels", 0) > 0:
@@ -272,12 +335,14 @@ class AudioSpectrumWorker(QtCore.QThread):
                 except Exception:
                     loopback_device = None
 
+            # 3. Default Windows Audio (Auto-Follow) loopback endpoint
             if not loopback_device:
                 try:
                     loopback_device = pa.get_default_wasapi_loopback()
                 except Exception:
                     pass
 
+            # 4. Fallback search via WASAPI default output device
             if not loopback_device:
                 try:
                     wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
@@ -297,7 +362,7 @@ class AudioSpectrumWorker(QtCore.QThread):
 
             if not loopback_device:
                 self.sigStatusChanged.emit("No loopback audio device found.")
-                self._run_fallback_decay_loop()
+                self._run_fallback_decay_loop(timeout_sec=2.0)
                 return
 
             new_rate = int(loopback_device["defaultSampleRate"])
@@ -332,11 +397,11 @@ class AudioSpectrumWorker(QtCore.QThread):
             )
             stream.start_stream()
 
-            self._process_audio_stream()
+            self._process_audio_stream(stream=stream)
 
         except Exception as e:
             self.sigStatusChanged.emit(f"Audio error: {e}")
-            self._run_fallback_decay_loop()
+            self._run_fallback_decay_loop(timeout_sec=2.0)
         finally:
             if stream:
                 try:
@@ -390,7 +455,7 @@ class AudioSpectrumWorker(QtCore.QThread):
     # -------------------------------------------------------------------------
     # FFT DSP Loop with Tilt & Dynamic Normalization
     # -------------------------------------------------------------------------
-    def _process_audio_stream(self) -> None:
+    def _process_audio_stream(self, stream: Optional[Any] = None) -> None:
         fft_freqs = np.fft.rfftfreq(self.window_size, 1.0 / self.sample_rate)
         fft_freqs[0] = 1.0
         
@@ -399,6 +464,15 @@ class AudioSpectrumWorker(QtCore.QThread):
         buffer = np.zeros(self.window_size, dtype=np.float32)
 
         while not self._stop_event.is_set() and not self._restart_event.is_set():
+            # Check if underlying hardware stream stopped or was unplugged
+            if stream is not None:
+                try:
+                    if hasattr(stream, "is_active") and not stream.is_active():
+                        print("[AudioStream] Hardware stream stopped or endpoint disconnected.")
+                        break
+                except Exception:
+                    break
+
             # 1. Fetch available chunk with small timeout
             try:
                 chunk = self._audio_queue.get(timeout=0.015)
@@ -470,9 +544,12 @@ class AudioSpectrumWorker(QtCore.QThread):
                     self.sigSpectrumReady.emit(self.target_freqs, self._smoothed_mags.copy())
                 last_emit_time = now
 
-    def _run_fallback_decay_loop(self) -> None:
+    def _run_fallback_decay_loop(self, timeout_sec: float = 2.0) -> None:
+        start_t = time.perf_counter()
         while not self._stop_event.is_set() and not self._restart_event.is_set():
             self.msleep(40)
             if self._enabled:
                 self._smoothed_mags = np.maximum(-20.0, self._smoothed_mags - 0.75)
                 self.sigSpectrumReady.emit(self.target_freqs, self._smoothed_mags.copy())
+            if timeout_sec > 0 and (time.perf_counter() - start_t >= timeout_sec):
+                break
