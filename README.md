@@ -60,6 +60,13 @@ A native, high-performance desktop equalizer application for Windows built with 
   - **Interactive Overlays & APO Sync**: Live visual overlays for raw measurement and target compensation traces directly on the canvas; optimized filters sync instantly to the interactive plot, bottom table, and debounced Equalizer APO output file with digital anti-clipping preamp calculation.
 - **Universal EQ Importer**:
   - Import profiles from Equalizer APO `.txt`, Room EQ Wizard (REW) exports, Peace `.peace` configurations, or `.json` presets.
+- **Hearing & Headphone Calibration Test (Peace-Style Audiometry)**:
+  - **Threshold-in-Noise Testing**: Plays background reference noise (Gaussian white noise or 1/f pink noise) and pure sine waves across standard frequencies (10-Band, 15-Band, or 31-Band 1/3-octave) to detect individual perceptual thresholds.
+  - **Pulsed Tone & Clickless Synthesis**: Real-time phase-continuous synthesis with smooth exponential gain ramping (zero clicks/pops) and pulsed beep modulation (250 ms ON / 250 ms OFF with raised-cosine windowing) to prevent auditory adaptation.
+  - **Channel Isolation**: Test Both Ears (Stereo), Left Ear only, or Right Ear only.
+  - **ISO 226:2003 Equal-Loudness Normalization**: Choose between Direct Masking Inversion (flat relative threshold) and ISO 226 equal-loudness contour compensation.
+  - **Anti-Clipping & Preset Integration**: Features adjustable strength (0–100%), max boost limiting (+3 to +18 dB), automatic digital anti-clipping preamp computation, instant A/B comparison bypass, and direct export to Equalizer APO and Clean APO presets.
+  - **Shortcut**: Accessible via top menu bar `Hearing Test` or `Ctrl+H`.
 - **Batch Editing Tools**:
   - **Flatten**: Resets all band gains to 0 dB.
   - **Compress 50%**: Halves all band gains to compress the dynamic range.
@@ -107,15 +114,26 @@ To install Clean APO as a native Windows desktop application (with Desktop & Sta
 
 | Action | Control |
 | :--- | :--- |
+| **Toggle Universal EQ Bypass** | **Ctrl+B** or click `EQ On` / `EQ Off` |
+| **New Flat Profile** | **Ctrl+N** or click `+ Add` in Profiles |
+| **Export Active Profile** | **Ctrl+E** or click `Export` in Profiles |
+| **Import / Paste APO** | Click `Import` in Profiles or right-click a profile |
+| **Switch to Profiles Tab** | **Ctrl+1** |
+| **Switch to AutoEQ Tab** | **Ctrl+2** |
+| **Hearing Calibration Test** | **Ctrl+H** or click `Hearing test` in the top bar |
+| **Keyboard Shortcuts Cheatsheet** | Press **?** or click `?` in the top bar |
+| **Undo / Redo Parameter Change** | **Ctrl+Z** / **Ctrl+Y** (or **Ctrl+Shift+Z**) |
+| **Rename Profile** | **F2** or double-click a profile |
+| **Delete Profile** | **Delete** (with profile list focused) |
 | **Move Frequency & Gain** | Left-click and drag a node |
+| **Fine Adjustment (5x Precision)** | **Shift+Drag** a node |
+| **Lock Frequency (Gain Only)** | **Ctrl+Drag** a node |
+| **Lock Gain (Frequency Only)** | **Alt+Drag** a node |
 | **Adjust Q Factor** | Scroll mouse wheel over a node |
-| **Node Context Menu** | Right-click a node |
-| **Add New Band** | Double-click on any empty area of the canvas |
-| **Rename Profile** | Press **F2** |
-| **Flatten All Bands** | Click "Flatten" in the filter table header |
-| **Compress All Bands** | Click "Compress 50%" in the filter table header |
-| **Universal EQ Bypass** | Click "EQ: ON / EQ: BYPASS" in the top header |
-| **Select Audio Device** | Use the "DEVICE" dropdown in the top header |
-| **Import EQ Profile** | Click "Import EQ" in the sidebar |
-| **AutoEQ Global Search** | Click "Global Model Search" in the AutoEQ sidebar |
-| **Offline Library Sync** | Click "Offline Sync" in the AutoEQ sidebar |
+| **Toggle Band Bypass** | **Middle-click** a node (or click its band badge) |
+| **Reset Band Gain to 0 dB** | **Double-click** a node |
+| **Add New Band** | **Double-click** on empty plot canvas |
+| **Toggle ±12 / ±20 dB Graph Scale** | **Double-click** the Y-axis or click `±20 dB` in the bands bar |
+| **Node / Canvas Context Menu** | **Right-click** a node or canvas |
+| **Auto Anti-Clipping Preamp** | Click `Auto` beside the Preamp slider |
+| **Spectrum Peak-Hold / Freeze / Tilt / Speed** | Click the chevron next to `Spectrum` |

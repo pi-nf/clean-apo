@@ -4,7 +4,7 @@ using PyQt6 QPainter and standard Windows ICO container format.
 """
 import os
 import struct
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui
 
 def create_icon_image(size: int) -> QtGui.QImage:
     img = QtGui.QImage(size, size, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
@@ -94,8 +94,13 @@ def save_ico(images: list[QtGui.QImage], ico_path: str):
     for img in images:
         ba = QtCore.QByteArray()
         buf = QtCore.QBuffer(ba)
-        buf.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
-        img.save(buf, "PNG")
+        if not buf.open(QtCore.QIODevice.OpenModeFlag.WriteOnly):
+            raise RuntimeError("Failed to open QBuffer for PNG encoding.")
+        try:
+            if not img.save(buf, "PNG"):
+                raise RuntimeError(f"Failed to encode {img.width()}x{img.height()} icon image as PNG.")
+        finally:
+            buf.close()
         png_buffers.append(bytes(ba))
         
     num_images = len(images)
@@ -120,7 +125,7 @@ def save_ico(images: list[QtGui.QImage], ico_path: str):
 
 
 def main():
-    app = QtWidgets.QApplication([])
+    _app = QtGui.QGuiApplication([])
     assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
     os.makedirs(assets_dir, exist_ok=True)
     
@@ -129,7 +134,8 @@ def main():
     
     # Save primary 256x256 PNG
     png_path = os.path.join(assets_dir, "clean_apo.png")
-    images[0].save(png_path, "PNG")
+    if not images[0].save(png_path, "PNG"):
+        raise RuntimeError(f"Failed to save PNG icon to {png_path}")
     print(f"Saved PNG icon to {png_path}")
     
     # Save multi-size Windows ICO

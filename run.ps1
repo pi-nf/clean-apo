@@ -1,6 +1,8 @@
 # Clean APO - PowerShell Setup & Launch Script
 # Automates virtual environment creation, dependency installation, and application execution.
 
+$ErrorActionPreference = "Stop"
+
 Write-Host "==========================================================" -ForegroundColor White
 Write-Host "       Clean APO for Equalizer APO - Setup & Launch       " -ForegroundColor White
 Write-Host "==========================================================" -ForegroundColor White
@@ -13,36 +15,31 @@ if (-not $pythonCmd) {
     Exit 1
 }
 
-$pyVersion = python --version
+$pyVersion = & python --version
 Write-Host "Detected: $pyVersion" -ForegroundColor Green
 
-# 2. Setup Virtual Environment
+# 2. Setup Virtual Environment inside $PSScriptRoot\.venv (independent of caller CWD)
 $venvPath = Join-Path $PSScriptRoot ".venv"
-if (-not (Test-Path $venvPath)) {
+$venvPython = Join-Path $venvPath "Scripts\python.exe"
+if (-not (Test-Path $venvPython)) {
     Write-Host "`nCreating virtual environment in: $venvPath..." -ForegroundColor Yellow
-    python -m venv .venv
-    if ($LASTEXITCODE -ne 0) {
+    & python -m venv $venvPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPython)) {
         Write-Host "Failed to create virtual environment." -ForegroundColor Red
         Exit 1
     }
 }
 
-# 3. Activate Virtual Environment
-$activateScript = Join-Path $venvPath "Scripts\Activate.ps1"
-if (Test-Path $activateScript) {
-    Write-Host "Activating virtual environment..." -ForegroundColor Gray
-    & $activateScript
-} else {
-    Write-Host "Virtual environment activation script not found. Using system python." -ForegroundColor Yellow
-}
-
-# 4. Install / Verify Dependencies
+# 3. Install / Verify Dependencies directly with the venv Python (avoids ExecutionPolicy activation issues)
 Write-Host "`nInstalling / verifying required packages..." -ForegroundColor Yellow
-pip install -r (Join-Path $PSScriptRoot "requirements.txt")
+$reqPath = Join-Path $PSScriptRoot "requirements.txt"
+& $venvPython -m pip install -r $reqPath
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Package installation encountered an error." -ForegroundColor Red
+    Write-Host "Package installation encountered an error (exit code $LASTEXITCODE)." -ForegroundColor Red
+    Exit 1
 }
 
-# 5. Launch Application
+# 4. Launch Application directly with the venv Python
 Write-Host "`nLaunching Clean APO..." -ForegroundColor White
-python (Join-Path $PSScriptRoot "main.py")
+& $venvPython (Join-Path $PSScriptRoot "main.py")
+Exit $LASTEXITCODE

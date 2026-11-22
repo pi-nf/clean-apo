@@ -1,33 +1,43 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-import sys
 
 block_cipher = None
 
+spec_file = globals().get('SPEC')
+base_dir = os.path.abspath(os.path.dirname(spec_file)) if spec_file else os.path.abspath('.')
+
 added_files = [
-    ('assets', 'assets'),
     ('squig_catalog.json', '.'),
-    ('presets.json', '.'),
 ]
 
-# Check for EqualizerAPO-x64-1.4.2.exe (or any EqualizerAPO*.exe) in assets/, installers/, and the repository root
-base_dir = os.path.abspath(os.path.dirname(SPEC)) if 'SPEC' in locals() else os.path.abspath('.')
+# Bundle assets/ cleanly (skipping scratch test_*.svg files and tracking any Equalizer APO installer)
+bundled_installer_names = set()
+assets_root = os.path.join(base_dir, 'assets')
+if os.path.isdir(assets_root):
+    for root, _dirs, files in os.walk(assets_root):
+        rel_dir = os.path.relpath(root, base_dir)
+        for fname in sorted(files):
+            low = fname.lower()
+            if low.startswith('test_') and low.endswith('.svg'):
+                continue
+            src_path = os.path.join(root, fname)
+            added_files.append((src_path, rel_dir))
+            if low.startswith('equalizerapo') and low.endswith('.exe'):
+                bundled_installer_names.add(fname)
 
-installer_search_dirs = [
-    (os.path.join(base_dir, 'assets'), 'assets'),
-    (os.path.join(base_dir, 'installers'), 'installers'),
-    (base_dir, 'assets'),
-]
-
-for s_dir, target_dir in installer_search_dirs:
-    if os.path.isdir(s_dir):
-        for fname in os.listdir(s_dir):
-            if fname.lower().startswith("equalizerapo") and fname.lower().endswith(".exe"):
-                src_path = os.path.join(s_dir, fname)
-                entry = (src_path, target_dir)
-                if entry not in added_files and (target_dir, target_dir) not in added_files:
-                    added_files.append(entry)
-                break
+# Also look for EqualizerAPO*.exe in installers/ or repository root if not already bundled from assets/
+if not bundled_installer_names:
+    for search_dir in (os.path.join(base_dir, 'installers'), base_dir):
+        if os.path.isdir(search_dir):
+            for fname in sorted(os.listdir(search_dir)):
+                low = fname.lower()
+                if low.startswith('equalizerapo') and low.endswith('.exe'):
+                    src_path = os.path.join(search_dir, fname)
+                    added_files.append((src_path, 'assets'))
+                    bundled_installer_names.add(fname)
+                    break
+        if bundled_installer_names:
+            break
 
 hidden_imports = [
     'numpy',
@@ -36,6 +46,7 @@ hidden_imports = [
     'scipy.interpolate',
     'scipy.special',
     'scipy.signal',
+    'scipy.sparse',
     'sounddevice',
     'pyaudiowpatch',
     'pyqtgraph',
@@ -47,7 +58,7 @@ hidden_imports = [
     'requests',
     'urllib.parse',
     'sqlite3',
-    'unittest',
+    'hearing_test',
 ]
 
 a = Analysis(
@@ -68,6 +79,8 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+upx_exclude_list = sorted({'qwindows.dll', *bundled_installer_names})
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -79,8 +92,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=['EqualizerAPO-x64-1.4.2.exe', 'qwindows.dll'],
+    # Disabled to prevent Windows Defender false positives and NSIS installer CRC issues
+    upx=False,
+    upx_exclude=upx_exclude_list,
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
